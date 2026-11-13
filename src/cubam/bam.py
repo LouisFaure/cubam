@@ -81,6 +81,11 @@ class BamHeader:
                     return field[3:]
         return "unknown"
 
+    def require_coordinate_sorted(self, path: str | Path = "BAM") -> None:
+        """Raise unless the header says the records are sorted by coordinate."""
+        if self.sort_order != "coordinate":
+            raise ValueError(f"{path}: not coordinate-sorted (@HD SO:{self.sort_order})")
+
     def lines(self, kind: str) -> list[str]:
         """Header lines of one kind, e.g. ``"@PG"``."""
         return [line for line in self.text.split("\n") if line.startswith(kind + "\t")]
@@ -166,6 +171,7 @@ class Tag:
             raise ValueError(f"A tag name has two characters, not {name!r}")
         n = len(batch)
         self.batch = batch
+        self.name = name
         self.type = cp.empty(n, cp.uint8)
         self.offset = cp.empty(n, cp.int64)
         self.length = cp.empty(n, cp.int32)

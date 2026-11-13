@@ -31,8 +31,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-
 from cubam.bam import (
     DUPLICATE,
     MATE_UNMAPPED,
@@ -47,6 +45,9 @@ from cubam.bam import (
     read_bam,
     unpack_acgt,
 )
+from cubam.cells import packed_barcodes
+from cubam.contigs import keep_mask
+from cubam.filters import ReadFilter
 
 _READ_COLS = ("ref", "pos", "flag", "nref", "npos", "hash", "bc", "five")
 _KEY = ["ref", "start", "end", "bc"]
@@ -240,26 +241,19 @@ def call_fragments(
     t0 = time.perf_counter()
     path = Path(path)
     header = BamHeader.read(path)
-    if header.sort_order != "coordinate":
-        raise ValueError(f"{path}: not coordinate-sorted (@HD SO:{header.sort_order})")
-    names = header.names
-    n_ref = len(names)
-    keep = np.ones(n_ref, bool)
-    if keep_chroms is not None:
-        unknown = sorted(set(keep_chroms) - set(names))
-        if unknown:
-            raise ValueError(f"Contigs not in the BAM header: {unknown[:5]}")
-        keep[:] = False
-        keep[[names.index(c) for c in keep_chroms]] = True
-    for c in drop_chroms:
-        if c in names:
-            keep[names.index(c)] = False
+    header.require_coordinate_sorted(path)
+    n_ref = len(header.names)
+    keep = keep_mask(header.names, keep_chroms, drop_chroms)
+    read_filter = ReadFilter(
+        min_mapq=min_mapq,
+        require=PAIRED | (PROPER_PAIR if require_proper_pair else 0),
+        exclude=UNMAPPED | MATE_UNMAPPED | SECONDARY | QC_FAIL | SUPPLEMENTARY,
+        same_contig_as_mate=True,
+    )
 
     with memory_pool():
         keep_ref = cp.asarray(keep)
         ref_len = cp.asarray(header.lengths, cp.int32)
-        reject = UNMAPPED | MATE_UNMAPPED | SECONDARY | QC_FAIL | SUPPLEMENTARY
-        need = PAIRED | (PROPER_PAIR if require_proper_pair else 0)
         keys = (
             "records",
             "kept_reads",
@@ -278,14 +272,10 @@ def call_fragments(
             last_ref, last_pos = (int(x) for x in cp.stack([batch.ref[-1], batch.pos[-1]]).get())
             if last_ref < 0:  # unplaced unmapped reads at the end
                 last_ref = n_ref
-            ok = batch.has_flags(need, reject) & (batch.mapq >= min_mapq) & (batch.ref >= 0) & (batch.ref == batch.nref)
-            ok &= keep_ref[cp.maximum(batch.ref, 0)]
-            sub = batch.take(ok)
+            sub = batch.take(read_filter.mask(batch, keep_ref))
             del batch
             tag = sub.tag(barcode_tag)
-            bc, packable = tag.packed()
-            if bool((tag.present & ~packable).any()):
-                raise ValueError(f"{barcode_tag} values other than [ACGT]+ with an optional -N are not supported yet")
+            bc, packable = packed_barcodes(tag)
             acc["no_barcode"] += (~packable).sum()
             sub = sub.take(packable)
             acc["kept_reads"] += len(sub)
