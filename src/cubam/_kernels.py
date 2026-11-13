@@ -239,6 +239,40 @@ __global__ void aligned_len(const unsigned char* b, const long long* off, long l
     out[i] = s;
 }
 
+// Aligned blocks: runs of M, = and X (and D unless split_del) between reference skips (N),
+// and between deletions when split_del. Insertions, soft and hard clips do not break a block.
+// With fill == 0 it counts the blocks of each read into cnt; otherwise it writes them from first[i].
+__global__ void blocks(const unsigned char* b, const long long* off, long long n, int split_del, int fill,
+                       const long long* first, int* cnt, long long* rec, int* start, int* end) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    long long o = off[i];
+    unsigned int lrn = b[o + 12], ncig = u16(b, o + 16);
+    long long cg = o + 36 + lrn;
+    int x = (int)u32(b, o + 8), s = x, k = 0;
+    long long w = fill ? first[i] : 0;
+    for (unsigned int c = 0; c < ncig; c++) {
+        unsigned int v = u32(b, cg + 4LL * c), op = v & 15, l = v >> 4;
+        bool aligned = op == 0 || op == 7 || op == 8 || (op == 2 && !split_del);
+        bool gap = op == 3 || (op == 2 && split_del);
+        if (aligned) {
+            x += l;
+        } else if (gap) {
+            if (x > s) {
+                if (fill) { rec[w + k] = i; start[w + k] = s; end[w + k] = x; }
+                k++;
+            }
+            x += l;
+            s = x;
+        }
+    }
+    if (x > s) {
+        if (fill) { rec[w + k] = i; start[w + k] = s; end[w + k] = x; }
+        k++;
+    }
+    if (!fill) cnt[i] = k;
+}
+
 // The read base at reference position refpos[j] of read rec[j]: 0-3 for A C G T, 4 for any
 // other base, -1 for a deletion, -2 for a reference skip (N), -3 when the read does not cover it.
 __global__ void base_at(const unsigned char* b, const long long* off, const long long* rec,

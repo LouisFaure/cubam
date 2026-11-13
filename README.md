@@ -38,6 +38,7 @@ page cache. From a network file system, the time is set by the read speed
 |---|---|---|
 | `cubam.apps.fragments` | ATAC fragments with the rules of Cell Ranger | Matches Cell Ranger ARC 2.0.2 on every row and count of 4 samples |
 | `cubam.apps.alleles` | Per-cell allele counts at known sites, as cellsnp-lite | Same output files as cellsnp-lite 1.2.3, byte for byte, on the GEX and ATAC BAM of one multiome sample |
+| `cubam.apps.coverage` | Coverage tracks per group of cells (clusters), as bigwig | RNA: same depth as `samtools depth` at every base of one group on chr19 of a GEX BAM |
 | velocity counts | Spliced, unspliced and ambiguous UMIs per cell and gene | Planned |
 
 ### Fragments
@@ -84,6 +85,42 @@ cellsnp-lite.
 A mode for every position of chrM, as mgatk counts for lineage tracing, is
 planned.
 
+### Coverage per group
+
+```python
+from cubam.cells import CellIndex
+from cubam.apps.coverage import coverage, fragment_coverage
+
+cells = CellIndex(barcodes, labels=adata.obs["leiden"])  # one group per cell
+
+rna = coverage("gex_possorted_bam.bam", cells)  # aligned blocks of reads
+atac = fragment_coverage("atac_possorted_bam.bam", cells, keep_chroms=primary_contigs)  # Tn5 insertions
+rna.write_bigwig("tracks/rna", normalize="cpm")  # one file per group
+atac.write_bigwig("tracks/atac", bin_size=10)
+```
+
+Each read or fragment adds +1 where it starts and -1 where it ends. The
+events are summed per group into runs of constant coverage while the BAM is
+read. `coverage` covers the aligned blocks of reads: introns split a read,
+deletions do not (as `bedtools genomecov -split`). By default it keeps
+primary alignments with MAPQ of at least 30 and no duplicate flag, which
+leaves one read per UMI in a Cell Ranger BAM. `fragment_coverage` takes
+fragments called with the rules of Cell Ranger (or a `Fragments` object),
+and covers either the Tn5 insertion at each end of a fragment (`start` and
+`end - 1`, as ArchR) or whole fragments. Tracks are normalised to counts
+per million reads, fragments or insertions of the group (`"cpm"`), per cell
+of the group (`"cells"`), or left as counts.
+
+On one multiome sample with 8 groups, on one NVIDIA A100:
+
+| Input | Coverage | Bigwig files |
+|---|---:|---:|
+| GEX BAM, 15 GB, 300 million records | 6.8 s | 23 s |
+| ATAC BAM, 46 GB: fragments, then insertions | 24 s + 1.0 s | 63 s (139 million runs) |
+
+Bigwig files are written with pyBigWig (`pip install cubam[bigwig]`), one
+group per process: pyBigWig writes about a million runs per second.
+
 ### Velocity counts (planned)
 
 Recent Cell Ranger versions record intronic and exonic reads in
@@ -112,9 +149,9 @@ a Cell Ranger GEX BAM.
 ## Development
 
 ```bash
-uv sync --extra rapids-cu12
-uv run --extra rapids-cu12 pytest
+uv sync --extra rapids-cu12 --extra bigwig
+uv run --extra rapids-cu12 --extra bigwig pytest
 ```
 
 The tests write small BAM files with a pure-Python writer (`tests/bamwriter.py`)
-and need a GPU.
+and need a GPU. The bigwig test is skipped without pyBigWig.

@@ -46,6 +46,7 @@ class CellIndex:
         order = np.argsort(h)
         self._sorted = cp.asarray(h[order])
         self._index = cp.asarray(order.astype(np.int32))
+        self._packed = None
         self.groups: list = []
         self._group = None
         if labels is not None:
@@ -71,6 +72,32 @@ class CellIndex:
         j = cp.minimum(cp.searchsorted(self._sorted, h), len(self.barcodes) - 1)
         return cp.where(self._sorted[j] == h, self._index[j], -1)
 
+    def lookup_packed(self, codes):
+        """Index of the cell of packed barcodes (:func:`packed_barcodes`, the ``bc`` of fragments); -1 if absent.
+
+        Barcodes of the list that do not fit a code match nothing.
+        """
+        import cupy as cp
+
+        if self._packed is None:
+            code = pack_acgt(self.barcodes)
+            fits = np.flatnonzero(code != 0)
+            order = fits[np.argsort(code[fits])]
+            self._packed = (cp.asarray(code[order]), cp.asarray(order.astype(np.int32)))
+        keys, index = self._packed
+        codes = cp.asarray(codes, cp.uint64)
+        if keys.size == 0:
+            return cp.full(codes.size, -1, cp.int32)
+        j = cp.minimum(cp.searchsorted(keys, codes), keys.size - 1)
+        return cp.where((keys[j] == codes) & (codes != 0), index[j], -1).astype(cp.int32)
+
+    def group_sizes(self) -> np.ndarray:
+        """Number of cells in each group."""
+        if self._group is None:
+            raise ValueError("This CellIndex has no labels")
+        codes = self._group.get()
+        return np.bincount(codes[codes >= 0], minlength=len(self.groups))
+
     def group(self, cell):
         """Group index of cells (from :meth:`lookup`); -1 for no cell or no group."""
         import cupy as cp
@@ -79,6 +106,26 @@ class CellIndex:
             raise ValueError("This CellIndex has no labels")
         cell = cp.asarray(cell)
         return cp.where(cell >= 0, self._group[cp.maximum(cell, 0)], -1)
+
+
+def pack_acgt(values: Sequence[str]) -> np.ndarray:
+    """Codes of :meth:`Tag.packed` computed on the host; 0 for a value that does not fit."""
+    out = np.zeros(len(values), np.uint64)
+    base = {"A": 0, "C": 1, "G": 2, "T": 3}
+    for i, v in enumerate(values):
+        seq, dash, suffix = v.partition("-")
+        if not 1 <= len(seq) <= 24 or any(c not in base for c in seq):
+            continue
+        if dash and not (1 <= len(suffix) <= 3 and suffix.isascii() and suffix.isdigit()):
+            continue
+        code = 0
+        for k, c in enumerate(seq):
+            code |= base[c] << (2 * k)
+        code |= len(seq) << 48
+        if dash:
+            code |= (int(suffix) + 1) << 53
+        out[i] = code
+    return out
 
 
 def packed_barcodes(tag: Tag):

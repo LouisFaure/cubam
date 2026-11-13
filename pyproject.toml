@@ -30,6 +30,7 @@ optional-dependencies.rapids-cu12 = [
   "cupy-cuda12x[ctk]>=14",
   "nvidia-libnvcomp-cu12>=5.1",
 ]
+optional-dependencies.bigwig = [ "pybigwig>=0.3.22" ]
 
 [dependency-groups]
 dev = [ "ruff>=0.17" ]

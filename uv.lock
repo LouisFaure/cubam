@@ -42,6 +42,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+bigwig = [
+    { name = "pybigwig" },
+]
 rapids-cu12 = [
     { name = "cudf-cu12" },
     { name = "cupy-cuda12x", extra = ["ctk"] },
@@ -63,8 +66,9 @@ requires-dist = [
     { name = "numpy", specifier = ">=2" },
     { name = "nvidia-libnvcomp-cu12", marker = "extra == 'rapids-cu12'", specifier = ">=5.1" },
     { name = "pandas", specifier = ">=2.3" },
+    { name = "pybigwig", marker = "extra == 'bigwig'", specifier = ">=0.3.22" },
 ]
-provides-extras = ["rapids-cu12"]
+provides-extras = ["bigwig", "rapids-cu12"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.17" }]
@@ -851,6 +855,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ae/ff/0e6cd73832d97c3852284eda9bee2428c53a92bcf6f6aa4bda1e15314a59/pyarrow-26.0.1-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:b801300d65859adaf611c9c0a4cb39bd3cb1713b60b974ad20650a8a0f8af2fd", size = 55512474, upload-time = "2026-11-03T10:53:56.512Z" },
     { url = "https://files.pythonhosted.org/packages/f0/1e/43cdcf9719169f0228b3e516e5004ed0acfc3a4c70ce35e3f2a80a485baf/pyarrow-26.0.1-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:2623b6c20637c0e2c40be96bda3d127dde49d6e6734ad6e71df91a013e40a3c4", size = 58616300, upload-time = "2026-11-03T10:54:04.472Z" },
     { url = "https://files.pythonhosted.org/packages/df/bf/8e29b47c61fc961e92e96db129d5dc7b716c2091dfe05359e70f20d712b9/pyarrow-26.0.1-cp315-cp315t-win_amd64.whl", hash = "sha256:55b1d871f21c8ed249c93f7375a35c35aa9b7b3af6896405cb8a6b67ad9bc7f9", size = 29909417, upload-time = "2026-11-03T10:54:09.613Z" },
+]
+
+[[package]]
+name = "pybigwig"
+version = "0.3.29"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fc/a7/2c42ce725840402fccc8f744d9aa885872fb156122a18ef0b132b17daaab/pybigwig-0.3.29.tar.gz", hash = "sha256:031336c0e6e15dd9a506f8176d7086f5327dc30faef88d3e6aac45db8725283a", size = 76052, upload-time = "2026-10-30T09:25:57.621Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/b3/ff65a0df2176a2a8fb15e87b3bf6a88536a9e08ec282512fc7ff57482685/pybigwig-0.3.29-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a65294efe4497d5ba9de5be44ed37073ee76a3abb46738ccfa82a8fa208137b6", size = 187672, upload-time = "2026-10-30T09:26:00.151Z" },
+    { url = "https://files.pythonhosted.org/packages/31/9e/ba2dc70e79af10cb55965227193b7ea3b1f3691b8d1e547cdce68fa8c841/pybigwig-0.3.29-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fb664bcaea45128ddae8f20fabfd59bf01e01db714512ce6bcc7df556d3175d2", size = 189198, upload-time = "2026-10-30T09:26:01.233Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/f9/5adab8f9cc446efef1f8d4a3dc4a9f088ede4c8e338add9656e0673e29e3/pybigwig-0.3.29-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c3806d2dc07a595c1ab75b32021b91467987fb778f671d82ccb02a420646a2d2", size = 189219, upload-time = "2026-10-30T09:26:02.715Z" },
 ]
 
 [[package]]

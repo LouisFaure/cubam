@@ -321,6 +321,31 @@ class RecordBatch:
         launch("aligned_len", n, self.data, self.offset, np.int64(n), out)
         return out
 
+    def blocks(self, split_deletions: bool = False):
+        """Aligned blocks of the reads: ``(rec, start, end)``, one row per block, in read order.
+
+        A block is a run of CIGAR M, = and X on the reference, ``[start, end)``
+        0-based. Reference skips (``N``, introns) split blocks. Deletions are
+        part of a block, as in ``bedtools genomecov -split``, unless
+        ``split_deletions``. ``rec`` is the index of the read in this batch.
+        """
+        import cupy as cp
+
+        n = len(self)
+        cnt = cp.zeros(n, cp.int32)
+        dummy64, dummy32 = cp.empty(1, cp.int64), cp.empty(1, cp.int32)
+        args = (self.data, self.offset, np.int64(n), np.int32(split_deletions))
+        launch("blocks", n, *args, np.int32(0), dummy64, cnt, dummy64, dummy32, dummy32)
+        first = cp.zeros(n, cp.int64)
+        if n > 1:
+            first[1:] = cp.cumsum(cnt[:-1], dtype=cp.int64)
+        total = int(first[-1] + cnt[-1]) if n else 0
+        rec = cp.empty(total, cp.int64)
+        start = cp.empty(total, cp.int32)
+        end = cp.empty(total, cp.int32)
+        launch("blocks", n, *args, np.int32(1), first, cnt, rec, start, end)
+        return rec, start, end
+
     def base_at(self, rec, refpos):
         """The base of read ``rec[j]`` at reference position ``refpos[j]`` (0-based).
 
