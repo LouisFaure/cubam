@@ -81,6 +81,15 @@ class BamHeader:
                     return field[3:]
         return "unknown"
 
+    def to_bytes(self, text: str | None = None) -> bytes:
+        """The uncompressed BAM header (magic, SAM text, references), with ``text`` in place of the SAM text."""
+        t = (self.text if text is None else text).encode()
+        out = [b"BAM\1", struct.pack("<i", len(t)), t, struct.pack("<i", len(self.names))]
+        for name, length in zip(self.names, self.lengths, strict=True):
+            nb = name.encode() + b"\0"
+            out += [struct.pack("<i", len(nb)), nb, struct.pack("<i", length)]
+        return b"".join(out)
+
     def require_coordinate_sorted(self, path: str | Path = "BAM") -> None:
         """Raise unless the header says the records are sorted by coordinate."""
         if self.sort_order != "coordinate":
@@ -287,6 +296,15 @@ class RecordBatch:
         if idx.dtype == cp.bool_:
             idx = cp.flatnonzero(idx)
         return RecordBatch(self.data, self.offset[idx], self.header, {k: v[idx] for k, v in self.columns.items()})
+
+    def record_sizes(self):
+        """Bytes of each record, its length field included (int64)."""
+        import cupy as cp
+
+        b = self.data
+        o = self.offset
+        size = b[o].astype(cp.int64) | (b[o + 1].astype(cp.int64) << 8) | (b[o + 2].astype(cp.int64) << 16)
+        return (size | (b[o + 3].astype(cp.int64) << 24)) + 4
 
     def has_flags(self, all_of: int = 0, none_of: int = 0):
         """Records with every flag of ``all_of`` and none of ``none_of``."""

@@ -39,6 +39,7 @@ page cache. From a network file system, the time is set by the read speed
 | `cubam.apps.fragments` | ATAC fragments with the rules of Cell Ranger | Matches Cell Ranger ARC 2.0.2 on every row and count of 4 samples |
 | `cubam.apps.alleles` | Per-cell allele counts at known sites, as cellsnp-lite | Same output files as cellsnp-lite 1.2.3, byte for byte, on the GEX and ATAC BAM of one multiome sample |
 | `cubam.apps.coverage` | Coverage tracks per group of cells (clusters), as bigwig | RNA: same depth as `samtools depth` at every base of one group on chr19 of a GEX BAM |
+| `cubam.apps.split` | One BAM file per group of cells or per cell, compressed on the GPU | Same records as `samtools view -D CB:...` for one group of a GEX BAM |
 | `cubam.apps.features` | Counts per cell and feature (genes, repeats, peaks) from a GTF, a BED or a tag | Same counts per gene as featureCounts 2.1.1 on chr19; with the `GX` tag, the same matrix as Cell Ranger ARC 2.0.2 |
 | velocity counts | Spliced, unspliced and ambiguous UMIs per cell and gene | Planned |
 
@@ -122,6 +123,35 @@ On one multiome sample with 8 groups, on one NVIDIA A100:
 Bigwig files are written with pyBigWig (`pip install cubam[bigwig]`), one
 group per process: pyBigWig writes about a million runs per second.
 
+### One BAM per group of cells
+
+```python
+from cubam.apps.split import split_bam
+
+res = split_bam("atac_possorted_bam.bam", CellIndex(barcodes, labels=clusters), "by_cluster/")
+res.paths  # {cluster: Path("by_cluster/<cluster>.bam")}, then samtools index
+```
+
+Records keep the order of the input, and each file has the header of the
+input with a `@PG` line. Without labels, or with `by="cell"`, there is one
+file per barcode. The BGZF blocks of all groups are compressed together, in
+one batched call of the Deflate compressor of nvCOMP per GB of records.
+
+On one multiome sample with 8 groups, on one NVIDIA A100 (the GEX BAM
+holds 94 million records of the listed cells, the ATAC BAM 235 million):
+
+| BAM | `level=2` (default) | `level=5` |
+|---|---:|---:|
+| GEX, 15 GB | 20 s, 5.4 GB written | |
+| ATAC, 46 GB | 53 s, 14.1 GB written | 302 s, 11.6 GB written |
+
+Level 2 files are about 17% larger than those of samtools (zlib level 6),
+level 5 files about 9% smaller. `samtools view -D CB:barcodes.txt` takes
+52 s for one group of the GEX BAM on 6 threads.
+
+`cubam.bgzf.BgzfWriter` writes any BGZF file (BAM, VCF.gz, fragments)
+from data on the GPU.
+
 ### Counts per cell and feature
 
 ```python
@@ -174,7 +204,8 @@ a Cell Ranger GEX BAM.
 ## Open items
 
 - **CRC32.** nvCOMP does not check the CRC32 in the BGZF trailer, and
-  neither does cubam. A corrupt block that still inflates to the right size
+  the reader does not either (`cubam.bgzf.crc32_spans` computes it, at
+  about 100 GB/s). A corrupt block that still inflates to the right size
   goes undetected. Sizes and Deflate errors are checked.
 - **nvCOMP 6.** cubam loads `libnvcomp.so.5`. nvCOMP 6 needs a check of the
   C API (the options struct).

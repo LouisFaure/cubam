@@ -67,6 +67,75 @@ __global__ void bgzf_sizes(const unsigned char* b, const long long* start, long 
     isize[i] = (long long)u32(b, s + bs - 4);
 }
 
+// CRC32 (zlib polynomial) of spans, one thread per span; the table is built in shared memory
+__global__ void crc32_spans(const unsigned char* b, const long long* off, const long long* len, long long n,
+                            unsigned int* out) {
+    __shared__ unsigned int table[256];
+    unsigned int t = threadIdx.x;
+    for (unsigned int k = t; k < 256; k += blockDim.x) {
+        unsigned int c = k;
+        for (int j = 0; j < 8; j++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        table[k] = c;
+    }
+    __syncthreads();
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const unsigned char* p = b + off[i];
+    unsigned int c = 0xFFFFFFFFu;
+    for (long long k = 0; k < len[i]; k++) c = table[(c ^ p[k]) & 255] ^ (c >> 8);
+    out[i] = c ^ 0xFFFFFFFFu;
+}
+
+// Adler-32 of spans, one thread per span
+__global__ void adler32_spans(const unsigned char* b, const long long* off, const long long* len, long long n,
+                              unsigned int* out) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const unsigned char* p = b + off[i];
+    unsigned int a = 1, s = 0;
+    long long k = 0, m = len[i];
+    while (k < m) {
+        long long e = k + 5552 < m ? k + 5552 : m;  // the largest run without overflow
+        for (; k < e; k++) { a += p[k]; s += a; }
+        a %= 65521u; s %= 65521u;
+    }
+    out[i] = (s << 16) | a;
+}
+
+// BGZF blocks: header, Deflate payload (or a stored block of the raw data when stored[i]), trailer.
+// One warp per block.
+__global__ void bgzf_frame(const unsigned char* comp, const long long* comp_off, const long long* csize,
+                           const unsigned char* raw, const long long* raw_off, const long long* isize,
+                           const unsigned char* stored, const unsigned int* crc, const long long* out_off,
+                           long long n, unsigned char* out) {
+    long long w = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane = threadIdx.x & 31;
+    if (w >= n) return;
+    unsigned char* d = out + out_off[w];
+    long long is = isize[w];
+    long long pay = stored[w] ? is + 5 : csize[w];
+    long long bs = 18 + pay + 8;
+    if (lane == 0) {
+        const unsigned char h[16] = {31, 139, 8, 4, 0, 0, 0, 0, 0, 255, 6, 0, 66, 67, 2, 0};
+        for (int k = 0; k < 16; k++) d[k] = h[k];
+        d[16] = (bs - 1) & 255; d[17] = (bs - 1) >> 8;
+        unsigned char* tr = d + 18 + pay;
+        unsigned int c = crc[w];
+        for (int k = 0; k < 4; k++) { tr[k] = (c >> (8 * k)) & 255; tr[4 + k] = (is >> (8 * k)) & 255; }
+        if (stored[w]) {
+            d[18] = 1;  // final stored block
+            d[19] = is & 255; d[20] = (is >> 8) & 255; d[21] = ~is & 255; d[22] = (~is >> 8) & 255;
+        }
+    }
+    if (stored[w]) {
+        const unsigned char* s = raw + raw_off[w];
+        for (long long k = lane; k < is; k += 32) d[23 + k] = s[k];
+    } else {
+        const unsigned char* s = comp + comp_off[w];
+        for (long long k = lane; k < pay; k += 32) d[18 + k] = s[k];
+    }
+}
+
 // ------------------------------------------------------------------ BAM records
 
 __device__ int reg2bin(int beg, int end) {
