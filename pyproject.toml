@@ -22,6 +22,7 @@ dependencies = [
   "numpy>=2",
   "pandas>=2.3",
 ]
+scripts.cubam-cellsnp = "cubam.cellsnp_cli:main"
 # cuDF (group-by, strings) and RMM come with RAPIDS. nvCOMP inflates BGZF
 # blocks through its C library (libnvcomp), which libcudf pins too.
 optional-dependencies.rapids-cu12 = [

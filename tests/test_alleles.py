@@ -149,3 +149,27 @@ def test_many_chunks_same_counts(tmp_path, block, chunk):
                 exp[(index[p], cell)] = (ad + (b == "G"), dp + (b in "AG"), oth + (b not in "AG"))
     exp = {k: v for k, v in exp.items() if any(v)}
     assert big == exp
+
+
+def test_cellsnp_cli_parse():
+    from cubam.cellsnp_cli import _parse
+
+    mode1a = ["-s", "x.bam", "-b", "bc.tsv", "-O", "out", "-R", "s.vcf", "-p", "20", "--minMAF", "0"]
+    o = _parse(mode1a + ["--minCOUNT", "2", "--UMItag", "Auto", "--cellTAG", "CB"])
+    assert o["bam"] == "x.bam" and o["min_count"] == "2" and o["umi_tag"] == "Auto"
+    assert _parse(["-S", "bams.tsv", "-i", "s.tsv", "-O", "o", "-R", "s.vcf"]) is None  # bulk mode
+    assert _parse(mode1a + ["--genotype"]) is None  # not implemented: cellsnp-lite
+    assert _parse(mode1a + ["--cellTAG", "None"]) is None
+    assert _parse(["-s", "a.bam,b.bam", "-b", "bc", "-O", "o", "-R", "s.vcf"]) is None
+
+
+def test_cellsnp_cli_runs(tmp_path):
+    from cubam.cellsnp_cli import main
+
+    reads = [read("r1", 1000, seq_with(10, "G")), read("r2", 1000, seq_with(10, "A"), umi="C" * 12, cell=CELLS[1])]
+    bam = write_bam(tmp_path / "a.bam", REFS, reads)
+    (tmp_path / "bc.tsv").write_text("\n".join(CELLS) + "\n")
+    (tmp_path / "s.vcf").write_text("##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\n1\t1011\t.\tA\tG\n")
+    args = ["-s", str(bam), "-b", str(tmp_path / "bc.tsv"), "-O", str(tmp_path / "o"), "-R", str(tmp_path / "s.vcf")]
+    assert main(args + ["--minCOUNT", "1", "--UMItag", "Auto", "--cellTAG", "CB"]) == 0
+    assert (tmp_path / "o" / "cellSNP.tag.AD.mtx").read_text().splitlines()[2] == "1\t2\t1"
