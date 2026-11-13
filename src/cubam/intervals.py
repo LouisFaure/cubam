@@ -60,7 +60,8 @@ class IntervalIndex:
     Parameters
     ----------
     chrom, start, end
-        The intervals: contig names, 0-based starts and exclusive ends.
+        The intervals: contig names (a sequence or a ``pd.Categorical``, the
+        fast way for millions of intervals), 0-based starts and exclusive ends.
     feature
         The feature of each interval (any hashable label). Features are
         numbered in order of first appearance; ``features`` lists them.
@@ -73,21 +74,31 @@ class IntervalIndex:
     """
 
     def __init__(self, chrom, start, end, feature, strand=None, attrs: pd.DataFrame | None = None):
-        chrom = pd.Series(np.asarray(chrom, dtype=object))
+        if not isinstance(chrom, pd.Categorical):
+            chrom = pd.Categorical(np.asarray(chrom, dtype=object))
         start = np.asarray(start, np.int64)
         end = np.asarray(end, np.int64)
+        feature = np.asarray(feature)
         if not len(chrom) == len(start) == len(end) == len(feature):
             raise ValueError("chrom, start, end and feature must have the same length")
         if (end < start).any() or (start < 0).any():
             raise ValueError("Intervals need 0 <= start <= end")
-        codes, names = pd.factorize(pd.Series(np.asarray(feature, dtype=object)), sort=False)
+        if feature.dtype.kind not in "iub":
+            feature = feature.astype(object)
+        if feature.dtype.kind in "iu" and np.array_equal(feature, np.arange(len(feature))):
+            codes, names = feature, feature  # one feature per interval, already numbered
+        else:
+            codes, names = pd.factorize(feature, sort=False)
+        if (codes < 0).any():
+            raise ValueError("Features cannot be missing")
         self._chrom = chrom
         self._start = start
         self._end = end
         self._feat = codes.astype(np.int32)
-        first = np.unique(codes, return_index=True)[1]
-        table = pd.DataFrame({"name": np.asarray(names, dtype=object)})
-        table["chrom"] = chrom.to_numpy()[first]
+        # first interval of each feature: codes number features in order of first appearance
+        first = np.arange(len(codes)) if len(names) == len(codes) else np.unique(codes, return_index=True)[1]
+        table = pd.DataFrame({"name": names if names.dtype.kind in "iub" else np.asarray(names, dtype=object)})
+        table["chrom"] = pd.Categorical.from_codes(chrom.codes[first], categories=chrom.categories)
         if strand is not None:
             table["strand"] = np.asarray(strand, dtype=object)[first]
         if attrs is not None:
@@ -194,7 +205,8 @@ class IntervalIndex:
         key = tuple(names)
         if key in self._cache:
             return self._cache[key]
-        ref = ref_ids(self._chrom, names)
+        ref = ref_ids(pd.Series(self._chrom.categories.astype(str)), names)[self._chrom.codes]
+        ref[self._chrom.codes < 0] = -1
         ok = ref >= 0
         r = cp.asarray(ref[ok]) << 32
         ks = r | cp.asarray(self._start[ok])

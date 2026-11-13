@@ -43,6 +43,7 @@ from cubam.bam import (
 from cubam.cells import CellIndex
 from cubam.contigs import ref_ids
 from cubam.filters import ReadFilter
+from cubam.intervals import IntervalIndex
 
 _BASE = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
 
@@ -230,6 +231,10 @@ def count_alleles(
         cells_index = CellIndex(barcodes) if isinstance(barcodes, list) else CellIndex.from_file(barcodes)
         site_key = cp.asarray(key[order])
         site_pos = cp.asarray((key[order] & 0xFFFFFFFF).astype(np.int32))
+        # each site is a feature of one base, numbered in sorted order
+        sorted_ref, sorted_pos = key[order] >> 32, key[order] & 0xFFFFFFFF
+        chrom = pd.Categorical.from_codes(sorted_ref, categories=pd.Index(header.names))
+        index = IntervalIndex(chrom, sorted_pos, sorted_pos + 1, np.arange(order.size))
         parts = []
         ordinal0 = 0
         for batch in read_bam(bam, chunk_bytes):
@@ -255,17 +260,9 @@ def count_alleles(
             if not len(sub):
                 continue
             # (read, site) pairs: the sites in [pos, end) of each read
-            rkey = sub.ref.astype(cp.int64) << 32
-            lo = cp.searchsorted(site_key, rkey | sub.pos.astype(cp.int64))
-            hi = cp.searchsorted(site_key, rkey | sub.end.astype(cp.int64))
-            cnt = hi - lo
-            ends = cp.cumsum(cnt)
-            total = int(ends[-1])
-            if total == 0:
+            rec, site, _ = index.overlaps(header.names, sub.ref, sub.pos, sub.end)
+            if rec.size == 0:
                 continue
-            j = cp.arange(total)
-            rec = cp.searchsorted(ends, j, side="right")
-            site = lo[rec] + (j - (ends[rec] - cnt[rec]))
             base = sub.base_at(rec, site_pos[site])
             good = cp.flatnonzero(base >= 0)
             rec, site, base = rec[good], site[good], base[good]
