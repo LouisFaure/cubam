@@ -136,6 +136,46 @@ __global__ void bgzf_frame(const unsigned char* comp, const long long* comp_off,
     }
 }
 
+// ------------------------------------------------------------------ bigWig
+
+__device__ __forceinline__ void put32(unsigned char* d, unsigned int v) {
+    d[0] = v & 255; d[1] = (v >> 8) & 255; d[2] = (v >> 16) & 255; d[3] = v >> 24;
+}
+
+// Uncompressed bedGraph sections of a bigWig: a 24-byte header, then 12 bytes per item.
+// One thread per item; the first item of a section writes its header.
+__global__ void bw_data_sections(const int* ref, const int* start, const int* end, const float* value,
+                                 const long long* sec, const long long* sec_first, const long long* sec_count,
+                                 const long long* sec_off, long long n, unsigned char* out) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    long long s = sec[i], k = i - sec_first[s];
+    unsigned char* d = out + sec_off[s];
+    if (k == 0) {
+        long long last = sec_first[s] + sec_count[s] - 1;
+        put32(d, ref[i]); put32(d + 4, start[i]); put32(d + 8, end[last]);
+        put32(d + 12, 0); put32(d + 16, 0);
+        d[20] = 1; d[21] = 0;  // bedGraph
+        d[22] = sec_count[s] & 255; d[23] = (sec_count[s] >> 8) & 255;
+    }
+    unsigned char* it = d + 24 + 12 * k;
+    put32(it, start[i]); put32(it + 4, end[i]); put32(it + 8, __float_as_uint(value[i]));
+}
+
+// Zoom records of a bigWig, 32 bytes each, one thread per record
+__global__ void bw_zoom_records(const int* ref, const int* start, const int* end, const unsigned int* count,
+                                const float* mn, const float* mx, const float* sum, const float* ssq,
+                                const long long* sec, const long long* sec_first, const long long* sec_off,
+                                long long n, unsigned char* out) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    long long s = sec[i];
+    unsigned char* d = out + sec_off[s] + 32 * (i - sec_first[s]);
+    put32(d, ref[i]); put32(d + 4, start[i]); put32(d + 8, end[i]); put32(d + 12, count[i]);
+    put32(d + 16, __float_as_uint(mn[i])); put32(d + 20, __float_as_uint(mx[i]));
+    put32(d + 24, __float_as_uint(sum[i])); put32(d + 28, __float_as_uint(ssq[i]));
+}
+
 // ------------------------------------------------------------------ BAM records
 
 __device__ int reg2bin(int beg, int end) {

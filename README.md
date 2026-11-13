@@ -117,11 +117,15 @@ On one multiome sample with 8 groups, on one NVIDIA A100:
 
 | Input | Coverage | Bigwig files |
 |---|---:|---:|
-| GEX BAM, 15 GB, 300 million records | 6.8 s | 23 s |
-| ATAC BAM, 46 GB: fragments, then insertions | 24 s + 1.0 s | 63 s (139 million runs) |
+| GEX BAM, 15 GB, 300 million records | 6.8 s | 3.0 s (15 million runs) |
+| ATAC BAM, 46 GB: fragments, then insertions | 24 s + 1.0 s | 13 s (139 million runs) |
 
-Bigwig files are written with pyBigWig (`pip install cubam[bigwig]`), one
-group per process: pyBigWig writes about a million runs per second.
+`cubam.bigwig.write_bigwig` writes the bigwig files on the GPU: data
+sections and zoom levels are built and compressed there, the R-trees on
+the host. `bigWigToBedGraph` (UCSC) gives the same lines as for the files
+pyBigWig writes, which took 85 s for the ATAC tracks
+(`write_bigwig(..., engine="pybigwig")`, needs `pip install cubam[bigwig]`).
+The files are about 20% larger, at the default nvCOMP level of 2.
 
 ### One BAM per group of cells
 
@@ -224,4 +228,5 @@ uv run --extra rapids-cu12 --extra bigwig pytest
 ```
 
 The tests write small BAM files with a pure-Python writer (`tests/bamwriter.py`)
-and need a GPU. The bigwig test is skipped without pyBigWig.
+and need a GPU. The bigwig tests read files back with pyBigWig, and are
+skipped without it.

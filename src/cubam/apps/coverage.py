@@ -104,28 +104,19 @@ class Coverage:
         normalize: str | None = "cpm",
         bin_size: int | None = None,
         prefix: str = "",
+        engine: str = "gpu",
         n_jobs: int | None = None,
     ) -> dict:
         """Write ``<outdir>/<prefix><group>.bw`` for each group; returns ``{group: path}``.
 
-        Needs pyBigWig (``pip install cubam[bigwig]``). The bigwig header lists
-        every contig of the BAM header, in its order. pyBigWig writes about a
-        million runs per second, so groups are written in ``n_jobs`` processes
-        (default: the CPUs this process may use).
+        The bigwig header lists every contig of the BAM header, in its order.
+        ``engine="gpu"`` writes with :func:`cubam.bigwig.write_bigwig`.
+        ``engine="pybigwig"`` writes with pyBigWig (``pip install
+        cubam[bigwig]``), about a million runs per second, one group per
+        process in ``n_jobs`` processes (default: the CPUs this process may use).
         """
-        try:
-            import pyBigWig  # noqa: F401
-        except ImportError as e:
-            raise ImportError("write_bigwig needs pyBigWig: pip install pyBigWig") from e
-        import json
-        import os
-        import subprocess
-        import sys
-        import tempfile
-
         outdir = Path(outdir)
         outdir.mkdir(parents=True, exist_ok=True)
-        contigs = json.dumps([[n, ln] for n, ln in zip(self.header.names, self.header.lengths, strict=True)])
         paths, used = {}, set()
         for group in self.groups:
             stem = prefix + re.sub(r"[^A-Za-z0-9._+-]+", "_", str(group))
@@ -133,6 +124,31 @@ class Coverage:
                 stem += "_"
             used.add(stem)
             paths[group] = outdir / f"{stem}.bw"
+        if engine == "gpu":
+            from cubam.bigwig import write_bigwig
+
+            for group in self.groups:
+                df = self.to_frame(group, normalize, bin_size)
+                write_bigwig(
+                    paths[group],
+                    self.header.names,
+                    self.header.lengths,
+                    *(df[k].values for k in ("ref", "start", "end", "value")),
+                )
+            return paths
+        if engine != "pybigwig":
+            raise ValueError(f"engine must be 'gpu' or 'pybigwig', not {engine!r}")
+        try:
+            import pyBigWig  # noqa: F401
+        except ImportError as e:
+            raise ImportError("engine='pybigwig' needs pyBigWig: pip install pyBigWig") from e
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        contigs = json.dumps([[n, ln] for n, ln in zip(self.header.names, self.header.lengths, strict=True)])
         n_jobs = max(1, min(n_jobs or len(os.sched_getaffinity(0)), len(self.groups)))
         running: list = []
 
