@@ -224,6 +224,67 @@ __global__ void find_tag(const unsigned char* b, const long long* off, long long
     ival[i] = iv;
 }
 
+// Number of aligned bases (M, =, X) of each read
+__global__ void aligned_len(const unsigned char* b, const long long* off, long long n, int* out) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    long long o = off[i];
+    unsigned int lrn = b[o + 12], ncig = u16(b, o + 16);
+    long long cg = o + 36 + lrn;
+    int s = 0;
+    for (unsigned int k = 0; k < ncig; k++) {
+        unsigned int v = u32(b, cg + 4LL * k), op = v & 15;
+        if (op == 0 || op == 7 || op == 8) s += v >> 4;
+    }
+    out[i] = s;
+}
+
+// The read base at reference position refpos[j] of read rec[j]: 0-3 for A C G T, 4 for any
+// other base, -1 for a deletion, -2 for a reference skip (N), -3 when the read does not cover it.
+__global__ void base_at(const unsigned char* b, const long long* off, const long long* rec,
+                        const int* refpos, long long m, signed char* base) {
+    long long j = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= m) return;
+    long long o = off[rec[j]];
+    int target = refpos[j];
+    unsigned int lrn = b[o + 12], ncig = u16(b, o + 16);
+    unsigned int lseq = u32(b, o + 20);
+    long long cg = o + 36 + lrn, sq = cg + 4LL * ncig;
+    long long x = (int)u32(b, o + 8), y = 0;
+    signed char r = -3;
+    for (unsigned int k = 0; k < ncig; k++) {
+        unsigned int v = u32(b, cg + 4LL * k), op = v & 15, l = v >> 4;
+        if (op == 0 || op == 7 || op == 8) {
+            if (target < x + l) {
+                long long q = y + (target - x);
+                if (target >= x && q < lseq) {
+                    unsigned int c = (b[sq + q / 2] >> ((q & 1) ? 0 : 4)) & 15;
+                    r = c == 1 ? 0 : c == 2 ? 1 : c == 4 ? 2 : c == 8 ? 3 : 4;
+                }
+                break;
+            }
+            x += l; y += l;
+        } else if (op == 2 || op == 3) {
+            if (target < x + l) { r = target >= x ? (op == 2 ? -1 : -2) : -3; break; }
+            x += l;
+        } else if (op == 1 || op == 4) {
+            y += l;
+        }
+    }
+    base[j] = r;
+}
+
+// FNV-1a 64 of string values (offset, length); 0 where length < 0
+__global__ void hash_spans(const unsigned char* b, const long long* voff, const int* vlen, long long n,
+                           unsigned long long* out) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (vlen[i] < 0) { out[i] = 0; return; }
+    unsigned long long x = 1469598103934665603ULL;
+    for (int k = 0; k < vlen[i]; k++) { x ^= b[voff[i] + k]; x *= 1099511628211ULL; }
+    out[i] = x;
+}
+
 // Pack a string value [ACGT]{1,24}(-[0-9]{1,3})? into 64 bits: 2 bits per base,
 // the length at bit 48, the suffix + 1 at bit 53 (0 = no suffix). ok = 0 when it does not fit.
 __global__ void pack_acgt(const unsigned char* b, const long long* voff, const int* vlen, long long n,

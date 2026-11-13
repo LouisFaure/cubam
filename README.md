@@ -37,7 +37,7 @@ page cache. From a network file system, the time is set by the read speed
 | Module | Output | Status |
 |---|---|---|
 | `cubam.apps.fragments` | ATAC fragments with the rules of Cell Ranger | Matches Cell Ranger ARC 2.0.2 on every row and count of 4 samples |
-| allele counts | Per-cell counts of each allele at a list of sites | Planned |
+| `cubam.apps.alleles` | Per-cell allele counts at known sites, as cellsnp-lite | Same output files as cellsnp-lite 1.2.3, byte for byte, on the GEX and ATAC BAM of one multiome sample |
 | velocity counts | Spliced, unspliced and ambiguous UMIs per cell and gene | Planned |
 
 ### Fragments
@@ -52,21 +52,37 @@ frags.to_frame()  # chrom, start, end, barcode, count (cuDF)
 `benchmarks/compare_cellranger.py` compares the result with the
 `atac_fragments.tsv.gz` of the same Cell Ranger run.
 
-### Allele counts (planned)
+### Allele counts
 
-Counts of each base per cell at known sites, as cellsnp-lite (mode 1) and
-vartrix produce for donor demultiplexing (vireo, souporcell), and at every
-position of chrM, as mgatk produces for lineage tracing.
+```python
+from cubam.apps.alleles import count_alleles
 
-1. Sites from a VCF or BED file, sorted, on the GPU.
-2. For each read, the sites it overlaps by binary search on the sorted sites.
-3. For each (read, site), the base and the base quality, from a walk of the
-   CIGAR in one thread per read.
-4. Filters: flags, MAPQ, base quality, and one count per UMI for RNA.
-5. A group-by on (site, barcode, base). Output as sparse matrices (AD, DP,
-   OTH), the files that vireo reads.
+res = count_alleles("gex_possorted_bam.bam", "snps.vcf", "barcodes.tsv", umi_tag="UB", min_count=2)
+res.write_cellsnp("pileup/sample_rna")  # cellSNP.base.vcf, cellSNP.samples.tsv, AD/DP/OTH matrices
+```
 
-Validation: cellsnp-lite and mgatk on the same multiome samples.
+The rules are those of cellsnp-lite 1.2.3 in mode 1a, with a VCF of sites
+and a barcode list:
+
+- reads with MAPQ of at least 20 and at least 30 aligned bases, proper pairs
+  only
+- one count per UMI, from the first read of the UMI (`umi_tag="UB"`)
+- every read counts, duplicates skipped (`umi_tag=None`, for ATAC)
+- sites with more than two alleles skipped
+
+On one multiome sample (5,647 cells, 7.4 million SNPs of 1000 Genomes), on
+one NVIDIA L40S against cellsnp-lite with 20 threads:
+
+| BAM | cubam | cellsnp-lite | Sites kept |
+|---|---:|---:|---:|
+| GEX, 15 GB | 11.5 s | 1,595 s | 316,964 |
+| ATAC, 46 GB | 37.9 s | 546 s | 2,577,210 |
+
+`benchmarks/compare_cellsnp.py` compares the counts with an output of
+cellsnp-lite.
+
+A mode for every position of chrM, as mgatk counts for lineage tracing, is
+planned.
 
 ### Velocity counts (planned)
 

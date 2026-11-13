@@ -139,6 +139,18 @@ def unpack_acgt(codes):
     return cudf.Series.from_pylibcudf(col)
 
 
+def fnv1a(values) -> np.ndarray:
+    """64-bit FNV-1a hashes of strings on the host, as :meth:`Tag.hash` computes them."""
+    out = np.empty(len(values), np.uint64)
+    mask = (1 << 64) - 1
+    for i, v in enumerate(values):
+        x = 1469598103934665603
+        for c in v.encode():
+            x = ((x ^ c) * 1099511628211) & mask
+        out[i] = x
+    return out
+
+
 class Tag:
     """An auxiliary tag of the records of a batch.
 
@@ -182,6 +194,17 @@ class Tag:
 
         is_str = (self.type == ord("Z")) | (self.type == ord("H"))
         return strings_at(self.batch.data, self.offset, cp.where(is_str, self.length, 0).astype(cp.int64))
+
+    def hash(self):
+        """64-bit FNV-1a hash of string values (:func:`fnv1a` gives the same on the host), 0 where missing."""
+        import cupy as cp
+
+        n = len(self.batch)
+        is_str = (self.type == ord("Z")) | (self.type == ord("H"))
+        out = cp.empty(n, cp.uint64)
+        length = cp.where(is_str, self.length, -1).astype(cp.int32)
+        launch("hash_spans", n, self.batch.data, self.offset, length, np.int64(n), out)
+        return out
 
     def packed(self):
         """String values packed into uint64 codes, and whether each value fits.
@@ -282,6 +305,31 @@ class RecordBatch:
 
         lrn = self.data[self.offset + 12].astype(cp.int64)
         return strings_at(self.data, self.offset + 36, lrn - 1)
+
+    def aligned_length(self):
+        """Number of aligned bases (CIGAR M, = and X) of each read."""
+        import cupy as cp
+
+        n = len(self)
+        out = cp.empty(n, cp.int32)
+        launch("aligned_len", n, self.data, self.offset, np.int64(n), out)
+        return out
+
+    def base_at(self, rec, refpos):
+        """The base of read ``rec[j]`` at reference position ``refpos[j]`` (0-based).
+
+        0 to 3 for A, C, G and T, 4 for any other base, -1 for a deletion, -2
+        for a reference skip (``N``), -3 when the read does not cover the
+        position. Soft-clipped bases do not cover any position.
+        """
+        import cupy as cp
+
+        rec = cp.asarray(rec, cp.int64)
+        refpos = cp.asarray(refpos, cp.int32)
+        m = int(rec.size)
+        out = cp.empty(m, cp.int8)
+        launch("base_at", m, self.data, self.offset, rec, refpos, np.int64(m), out)
+        return out
 
     def five_prime(self):
         """The 5' end of each read, soft clips included.
