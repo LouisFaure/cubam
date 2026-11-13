@@ -39,6 +39,7 @@ page cache. From a network file system, the time is set by the read speed
 | `cubam.apps.fragments` | ATAC fragments with the rules of Cell Ranger | Matches Cell Ranger ARC 2.0.2 on every row and count of 4 samples |
 | `cubam.apps.alleles` | Per-cell allele counts at known sites, as cellsnp-lite | Same output files as cellsnp-lite 1.2.3, byte for byte, on the GEX and ATAC BAM of one multiome sample |
 | `cubam.apps.coverage` | Coverage tracks per group of cells (clusters), as bigwig | RNA: same depth as `samtools depth` at every base of one group on chr19 of a GEX BAM |
+| `cubam.apps.features` | Counts per cell and feature (genes, repeats, peaks) from a GTF, a BED or a tag | Same counts per gene as featureCounts 2.1.1 on chr19; with the `GX` tag, the same matrix as Cell Ranger ARC 2.0.2 |
 | velocity counts | Spliced, unspliced and ambiguous UMIs per cell and gene | Planned |
 
 ### Fragments
@@ -120,6 +121,44 @@ On one multiome sample with 8 groups, on one NVIDIA A100:
 
 Bigwig files are written with pyBigWig (`pip install cubam[bigwig]`), one
 group per process: pyBigWig writes about a million runs per second.
+
+### Counts per cell and feature
+
+```python
+from cubam.intervals import IntervalIndex
+from cubam.apps.features import count_features
+
+genes = IntervalIndex.from_gtf("genes.gtf", feature="exon", group_by="gene_id")  # or feature="gene"
+res = count_features("gex_possorted_bam.bam", genes, "barcodes.tsv.gz", umi_tag="UB", strand="sense")
+res.write_mtx("counts/")  # matrix.mtx.gz, barcodes.tsv.gz, features.tsv.gz
+adata = res.to_anndata()  # needs anndata and scipy
+```
+
+`IntervalIndex` cuts the genome at every start and end of the intervals of
+a GTF or BED file, so that each segment between two cuts holds a fixed set
+of features; a read is matched to features with two binary searches. The
+rules per read are those of featureCounts: the aligned blocks of the read
+(or its 5' or 3' end) must overlap a feature by `min_overlap` bases, on the
+same strand with `strand="sense"`, and `assign` picks the features of the
+read (`"unique"`: exactly one, `"any"`: each, `"largest"`: the one with the
+most bases). With `umi_tag`, a (cell, UMI, feature) counts once.
+
+Features can also come from a tag: `count_features(bam, "GX", ...)`
+counts the gene Cell Ranger gave each read. `where` adds a test on the
+records, e.g. `where=lambda b: (b.tag("xf").value & 8) != 0` for the reads
+Cell Ranger counted.
+
+On the GEX BAM of one multiome sample (15 GB), on one NVIDIA A100:
+
+| Features | Time | Compared with |
+|---|---:|---|
+| `GX` tag, `xf` bit 8 | 34 s | Cell Ranger matrix: all 12,507,428 entries equal |
+| GTF exons, sense, `UB` | 11 s | featureCounts `-t exon -s 1 -M` on chr19: every gene equal |
+| GTF gene bodies, sense, `UB` | 9.5 s | featureCounts `-t gene -s 1 -M` on chr19: every gene equal |
+
+Gene bodies give 3.8% more UMIs than the Cell Ranger matrix: Cell Ranger
+prefers an exon over an intron when genes overlap, and drops UMIs seen on
+several genes.
 
 ### Velocity counts (planned)
 
