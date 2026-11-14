@@ -58,6 +58,8 @@ LAYERS = ("spliced", "unspliced", "ambiguous")
 
 # per (molecule, transcript): reads, and whether a segment matched an exon, an intron, a validated
 # intron, or crossed a junction of a validated intron
+#: GPU memory for the molecules of a share of the cells, as a multiple of their rows in host memory
+_BUCKET_FACTOR = 16
 _MT_AGG = {"r": "sum", "e": "max", "i": "max", "v": "max", "s": "max"}
 
 
@@ -527,7 +529,7 @@ def count_velocity(
     umi_tag: str = "UB",
     mask: str | Path | RepeatMask | None = None,
     quirks: bool = True,
-    chunk_bytes: int = 256 << 20,
+    chunk_bytes: int | None = None,
 ) -> Velocity:
     """Count spliced, unspliced and ambiguous molecules per cell and gene, as ``velocyto run``.
 
@@ -656,44 +658,66 @@ def count_velocity(
                 .groupby(["cell", "umi"])
                 .agg({"R": "sum"})
                 .reset_index()
+                .to_pandas()
             )
-            parts.append(per.groupby(["cell", "umi", "tm"]).agg(_MT_AGG).reset_index())
+            parts.append(per.groupby(["cell", "umi", "tm"]).agg(_MT_AGG).reset_index().to_pandas())
             del sub, df, per
-        out = None
-        if parts:
-            mt = cudf.concat(parts, ignore_index=True)
-            del parts
-            mt = mt.groupby(["cell", "umi", "tm"]).agg(_MT_AGG).reset_index()
-            mols = cudf.concat(mol_parts, ignore_index=True).groupby(["cell", "umi"]).agg({"R": "sum"}).reset_index()
-            del mol_parts
-            stats["molecules"] = len(mols)
-            # transcripts shared by every read of the molecule
-            mt = mt.merge(mols, on=["cell", "umi"])
-            mt = mt[mt["r"] == mt["R"]]
-            mt["gene"] = tm_gene[mt["tm"].values]
-            mt["onlyexo"] = mt["e"] & ~mt["i"]
-            mt["onlyintron"] = mt["i"] & ~mt["e"]
-            mt["mixed"] = mt["e"] & mt["i"] & ~mt["s"]
-            mt["gmax"] = mt["gene"]
-            m = mt.groupby(["cell", "umi"]).agg(
-                {"gene": "min", "gmax": "max", "onlyexo": "max", "onlyintron": "max", "mixed": "max", "s": "min"}
-            )
-            m = m.rename(columns={"s": "allspan"}).reset_index()
-            del mt
-            stats["no_shared_transcript"] = stats["molecules"] - len(m)
-            multi = m["gene"] != m["gmax"]
-            stats["multigene"] = int(multi.sum())
-            m = m[~multi]
-            layer = _classify(m)
-            stats["unclassified"] = int((layer < 0).sum())
-            for i, name in enumerate(LAYERS):
-                m[name] = (layer == i).astype(cp.int32)
-                stats[name] = int(m[name].sum())
-            m = m[layer >= 0]
-            out = m.groupby(["cell", "gene"]).agg(dict.fromkeys(LAYERS, "sum")).reset_index()
-            out["cell"] = out["cell"].astype("int32")
-            out["gene"] = out["gene"].astype("int32")
-            out = out.sort_values(["cell", "gene"]).reset_index(drop=True)
-        if out is None:
+        # A molecule lies in one cell: reduce the rows of a share of the cells at a time
+        mt_all = pd.concat(parts, ignore_index=True) if parts else None
+        mols_all = pd.concat(mol_parts, ignore_index=True) if mol_parts else None
+        del parts, mol_parts
+        outs = []
+        for k in ("molecules", "no_shared_transcript", "multigene", "unclassified", *LAYERS):
+            stats[k] = 0
+        if mt_all is not None:
+            free, _ = cp.cuda.runtime.memGetInfo()
+            n_buckets = int(min(max(1, -(-mt_all.memory_usage().sum() * _BUCKET_FACTOR // free)), len(cells)))
+            mt_bucket = mt_all["cell"].to_numpy() % n_buckets
+            mol_bucket = mols_all["cell"].to_numpy() % n_buckets
+            for b in range(n_buckets):
+                mt = cudf.from_pandas(mt_all[mt_bucket == b])
+                mols = cudf.from_pandas(mols_all[mol_bucket == b])
+                outs.append(_molecules(mt, mols, tm_gene, stats))
+            del mt_all, mols_all
+        outs = [o for o in outs if len(o)]
+        if outs:
+            out = cudf.concat(outs, ignore_index=True).sort_values(["cell", "gene"]).reset_index(drop=True)
+        else:
             out = cudf.DataFrame({k: cudf.Series([], dtype="int32") for k in ("cell", "gene", *LAYERS)})
     return Velocity(out, cells.barcodes, models.genes.copy(), stats, time.perf_counter() - t0)
+
+
+def _molecules(mt, mols, tm_gene, stats: dict):
+    """Counts per (cell, gene) of molecules, from rows per (cell, UMI, transcript) and reads per molecule."""
+    import cupy as cp
+
+    mt = mt.groupby(["cell", "umi", "tm"]).agg(_MT_AGG).reset_index()
+    mols = mols.groupby(["cell", "umi"]).agg({"R": "sum"}).reset_index()
+    stats["molecules"] += len(mols)
+    # transcripts shared by every read of the molecule
+    mt = mt.merge(mols, on=["cell", "umi"])
+    mt = mt[mt["r"] == mt["R"]]
+    mt["gene"] = tm_gene[mt["tm"].values]
+    mt["onlyexo"] = mt["e"] & ~mt["i"]
+    mt["onlyintron"] = mt["i"] & ~mt["e"]
+    mt["mixed"] = mt["e"] & mt["i"] & ~mt["s"]
+    mt["gmax"] = mt["gene"]
+    m = mt.groupby(["cell", "umi"]).agg(
+        {"gene": "min", "gmax": "max", "onlyexo": "max", "onlyintron": "max", "mixed": "max", "s": "min"}
+    )
+    m = m.rename(columns={"s": "allspan"}).reset_index()
+    del mt
+    stats["no_shared_transcript"] += len(mols) - len(m)
+    multi = m["gene"] != m["gmax"]
+    stats["multigene"] += int(multi.sum())
+    m = m[~multi]
+    layer = _classify(m)
+    stats["unclassified"] += int((layer < 0).sum())
+    for i, name in enumerate(LAYERS):
+        m[name] = (layer == i).astype(cp.int32)
+        stats[name] += int(m[name].sum())
+    m = m[layer >= 0]
+    out = m.groupby(["cell", "gene"]).agg(dict.fromkeys(LAYERS, "sum")).reset_index()
+    out["cell"] = out["cell"].astype("int32")
+    out["gene"] = out["gene"].astype("int32")
+    return out

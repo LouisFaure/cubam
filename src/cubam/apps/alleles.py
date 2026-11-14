@@ -178,7 +178,7 @@ def count_alleles(
     no_orphan: bool = True,
     min_count: int = 20,
     min_maf: float = 0.0,
-    chunk_bytes: int = 256 << 20,
+    chunk_bytes: int | None = None,
 ) -> AlleleCounts:
     """Count the alleles of each cell at known sites, as cellsnp-lite mode 1a.
 

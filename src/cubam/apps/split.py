@@ -132,8 +132,8 @@ def split_bam(
     read_filter: ReadFilter | None = None,
     prefix: str = "",
     level: int = 2,
-    flush_bytes: int = 1 << 30,
-    chunk_bytes: int = 256 << 20,
+    flush_bytes: int | None = None,
+    chunk_bytes: int | None = None,
 ) -> SplitResult:
     """Write the records of each group of cells (or of each cell) to ``<outdir>/<prefix><label>.bam``.
 
@@ -151,11 +151,17 @@ def split_bam(
         nvCOMP Deflate level (:func:`cubam.bgzf.deflate_spans`): 2 by
         default, 5 for files about 9% smaller than zlib level 6, slower.
     flush_bytes
-        Record bytes buffered on the GPU before compressing and writing.
+        Record bytes buffered on the GPU before compressing and writing
+        (default: 4 times ``chunk_bytes``).
+    chunk_bytes
+        Compressed bytes read at a time (default: :func:`cubam.auto_chunk_bytes`).
     """
     import cupy as cp
 
-    from cubam import memory_pool
+    from cubam import auto_chunk_bytes, memory_pool
+
+    chunk_bytes = chunk_bytes or auto_chunk_bytes()
+    flush_bytes = flush_bytes or 4 * chunk_bytes
 
     t0 = time.perf_counter()
     if by is None:

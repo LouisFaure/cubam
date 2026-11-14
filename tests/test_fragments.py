@@ -1,9 +1,14 @@
+import gzip
 import random
 
+import pandas as pd
 import pytest
 from bamwriter import Read, sort_key, write_bam
 
+from cubam.apps import coverage as coverage_mod
+from cubam.apps.coverage import fragment_coverage
 from cubam.apps.fragments import call_fragments
+from cubam.cells import CellIndex
 
 REFS = [("chr1", 1_000_000), ("chrM", 16_569), ("chrUn", 50_000)]
 BC = "ACGTACGTACGTACGT-1"
@@ -125,7 +130,7 @@ def test_not_coordinate_sorted(tmp_path):
 
 
 @pytest.mark.parametrize(("block", "chunk"), [(4096, 1 << 20), (500, 3000)])
-def test_many_chunks(tmp_path, block, chunk):
+def test_many_chunks(tmp_path, monkeypatch, block, chunk):
     rng = random.Random(1)
     reads, expected = [], {}
     barcodes = ["".join(rng.choices("ACGT", k=16)) + "-1" for _ in range(20)]
@@ -140,5 +145,18 @@ def test_many_chunks(tmp_path, block, chunk):
         expected[key] = expected.get(key, 0) + dups
     fr, got = call(tmp_path, reads, block=block, chunk_bytes=chunk)
     assert got == expected
-    t = fr.table.to_pandas()
+    t = fr.table
     assert (t["start"].diff().dropna() >= 0).all()
+    # the written file holds the same rows
+    fr.write_tsv(tmp_path / "f.tsv.gz")
+    with gzip.open(tmp_path / "f.tsv.gz", "rt") as fh:
+        rows = [line.rstrip("\n").split("\t") for line in fh]
+    assert {(c, int(s), int(e), b): int(n) for c, s, e, b, n in rows} == expected
+    # coverage from fragments streamed out of the BAM, or from the table in small slices, is the same
+    monkeypatch.setattr(coverage_mod, "_TABLE_ROWS", 500)
+    cells = CellIndex(barcodes, labels=[f"g{i % 3}" for i in range(len(barcodes))])
+    for mode in ("insertions", "fragments"):
+        streamed = fragment_coverage(tmp_path / "f.bam", cells, mode=mode, insertion_width=5, chunk_bytes=chunk)
+        sliced = fragment_coverage(fr, cells, mode=mode, insertion_width=5)
+        pd.testing.assert_frame_equal(streamed.runs, sliced.runs)
+        assert (streamed.units == sliced.units).all()

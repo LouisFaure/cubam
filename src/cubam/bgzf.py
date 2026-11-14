@@ -514,13 +514,18 @@ def inflate_blocks(buf, eof: bool):
     return out, used
 
 
-def inflate_chunks(path: str | Path, chunk_bytes: int = 256 << 20, **reader_kw) -> Iterator:
+def inflate_chunks(path: str | Path, chunk_bytes: int | None = None, **reader_kw) -> Iterator:
     """Inflated data of a BGZF file on the GPU, chunk by chunk (cupy uint8 arrays).
 
     Each chunk holds the data of the complete blocks read so far, so chunks
     split the data at block boundaries, not at record or line boundaries.
+    ``chunk_bytes`` (compressed) defaults to :func:`cubam.auto_chunk_bytes`.
     """
     import cupy as cp
+
+    from cubam._memory import auto_chunk_bytes
+
+    chunk_bytes = chunk_bytes or auto_chunk_bytes()
 
     reader = ChunkReader(path, chunk_bytes, **reader_kw)
     carry = cp.empty(0, cp.uint8)  # compressed bytes of the incomplete last block
