@@ -104,17 +104,14 @@ class Coverage:
         normalize: str | None = "cpm",
         bin_size: int | None = None,
         prefix: str = "",
-        engine: str = "gpu",
-        n_jobs: int | None = None,
     ) -> dict:
-        """Write ``<outdir>/<prefix><group>.bw`` for each group; returns ``{group: path}``.
+        """Write ``<outdir>/<prefix><group>.bw`` for each group, on the GPU; returns ``{group: path}``.
 
         The bigwig header lists every contig of the BAM header, in its order.
-        ``engine="gpu"`` writes with :func:`cubam.bigwig.write_bigwig`.
-        ``engine="pybigwig"`` writes with pyBigWig (``pip install
-        cubam[bigwig]``), about a million runs per second, one group per
-        process in ``n_jobs`` processes (default: the CPUs this process may use).
+        See :func:`cubam.bigwig.write_bigwig`.
         """
+        from cubam.bigwig import write_bigwig
+
         outdir = Path(outdir)
         outdir.mkdir(parents=True, exist_ok=True)
         paths, used = {}, set()
@@ -124,58 +121,13 @@ class Coverage:
                 stem += "_"
             used.add(stem)
             paths[group] = outdir / f"{stem}.bw"
-        if engine == "gpu":
-            from cubam.bigwig import write_bigwig
-
-            for group in self.groups:
-                df = self.to_frame(group, normalize, bin_size)
-                write_bigwig(
-                    paths[group],
-                    self.header.names,
-                    self.header.lengths,
-                    *(df[k].values for k in ("ref", "start", "end", "value")),
-                )
-            return paths
-        if engine != "pybigwig":
-            raise ValueError(f"engine must be 'gpu' or 'pybigwig', not {engine!r}")
-        try:
-            import pyBigWig  # noqa: F401
-        except ImportError as e:
-            raise ImportError("engine='pybigwig' needs pyBigWig: pip install pyBigWig") from e
-        import json
-        import os
-        import subprocess
-        import sys
-        import tempfile
-
-        contigs = json.dumps([[n, ln] for n, ln in zip(self.header.names, self.header.lengths, strict=True)])
-        n_jobs = max(1, min(n_jobs or len(os.sched_getaffinity(0)), len(self.groups)))
-        running: list = []
-
-        def wait_one():
-            proc, group = running.pop(0)
-            _, err = proc.communicate()
-            if proc.returncode:
-                raise RuntimeError(f"Writing the bigwig of {group!r} failed:\n{err.decode(errors='replace')}")
-
-        with tempfile.TemporaryDirectory(dir=outdir, prefix=".cubam-") as tmp:
-            try:
-                for i, group in enumerate(self.groups):
-                    df = self.to_frame(group, normalize, bin_size)
-                    runs = Path(tmp) / f"{i}.npz"
-                    cols = {k: df[k].values.get() for k in ("ref", "start", "end", "value")}
-                    np.savez(runs, contigs=contigs, **cols)
-                    del df, cols
-                    while len(running) >= n_jobs:
-                        wait_one()
-                    cmd = [sys.executable, "-m", "cubam._bigwig", str(runs), str(paths[group])]
-                    running.append((subprocess.Popen(cmd, stderr=subprocess.PIPE), group))
-                while running:
-                    wait_one()
-            finally:
-                for proc, _ in running:
-                    proc.kill()
-                    proc.wait()
+            df = self.to_frame(group, normalize, bin_size)
+            write_bigwig(
+                paths[group],
+                self.header.names,
+                self.header.lengths,
+                *(df[k].values for k in ("ref", "start", "end", "value")),
+            )
         return paths
 
 

@@ -123,9 +123,8 @@ On one multiome sample with 8 groups, on one NVIDIA A100:
 `cubam.bigwig.write_bigwig` writes the bigwig files on the GPU: data
 sections and zoom levels are built and compressed there, the R-trees on
 the host. `bigWigToBedGraph` (UCSC) gives the same lines as for the files
-pyBigWig writes, which took 85 s for the ATAC tracks
-(`write_bigwig(..., engine="pybigwig")`, needs `pip install cubam[bigwig]`).
-The files are about 20% larger, at the default nvCOMP level of 2.
+pyBigWig writes, which took 85 s for the ATAC tracks. The files are about
+20% larger, at the default nvCOMP level of 2.
 
 ### One BAM per group of cells
 
@@ -262,11 +261,11 @@ Reading the GTF takes 7 s more.
 ## Development
 
 ```bash
-uv sync --extra rapids-cu12 --extra bigwig --extra anndata
-uv run --extra rapids-cu12 --extra bigwig --extra anndata pytest
+uv sync --extra rapids-cu12 --extra anndata
+uv run --extra rapids-cu12 --extra anndata pytest
 ```
 
 The tests write small BAM files with a pure-Python writer (`tests/bamwriter.py`)
-and need a GPU. The bigwig tests read files back with pyBigWig, and the
-AnnData and loom outputs need the `anndata` extra; those tests are skipped
-without them.
+and need a GPU. The bigwig tests read files back with pyBigWig (in the
+`test` group). The AnnData and loom tests need the `anndata` extra and are
+skipped without it.

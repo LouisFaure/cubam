@@ -166,12 +166,11 @@ def test_normalise_and_bins():
         c.to_frame("T", normalize="rpkm")
 
 
-@pytest.mark.parametrize("engine", ["gpu", "pybigwig"])
-def test_write_bigwig(tmp_path, engine):
+def test_write_bigwig(tmp_path):
     pyBigWig = pytest.importorskip("pyBigWig")
     rows = [(0, 0, 100, CELLS[0]), (0, 50, 150, CELLS[0]), (1, 10, 20, CELLS[0]), (2, 5, 9, CELLS[1])]
     c = fragment_coverage(fragments_table(rows), CellIndex(CELLS, labels=["T/1", "B", "T/1", None]), mode="fragments")
-    paths = c.write_bigwig(tmp_path / "bw", normalize=None, prefix="s1_", engine=engine)
+    paths = c.write_bigwig(tmp_path / "bw", normalize=None, prefix="s1_")
     assert sorted(p.name for p in paths.values()) == ["s1_B.bw", "s1_T_1.bw"]
     bw = pyBigWig.open(str(paths["T/1"]))
     assert bw.chroms() == dict(REFS)
