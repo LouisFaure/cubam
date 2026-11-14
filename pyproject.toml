@@ -35,6 +35,7 @@ optional-dependencies.anndata = [ "anndata>=0.10" ]
 [dependency-groups]
 dev = [ "ruff>=0.17" ]
 test = [ "pybigwig>=0.3.22", "pytest>=9" ]
+docs = [ "furo>=2025.9.25", "myst-parser>=4", "sphinx>=8.2", "sphinx-copybutton>=0.5.2" ]
 
 [tool.hatch]
 version.source = "vcs"
