@@ -58,7 +58,7 @@ LAYERS = ("spliced", "unspliced", "ambiguous")
 
 # per (molecule, transcript): reads, and whether a segment matched an exon, an intron, a validated
 # intron, or crossed a junction of a validated intron
-#: GPU memory for the molecules of a share of the cells, as a multiple of their rows in host memory
+#: GPU memory for reducing rows per molecule, as a multiple of their size
 _BUCKET_FACTOR = 16
 _MT_AGG = {"r": "sum", "e": "max", "i": "max", "v": "max", "s": "max"}
 
@@ -600,7 +600,9 @@ def count_velocity(
         stats["validated_introns"] = int(validated.sum())
 
         # pass 2: transcripts of each read, then of each molecule
-        parts, mol_parts = [], []
+        # Rows per molecule stay on the GPU while they fit, else move to host memory
+        budget = cp.cuda.runtime.memGetInfo()[0] // _BUCKET_FACTOR
+        parts, mol_parts, held, on_host = [], [], 0, False
         for batch in read_bam(bam, chunk_bytes):
             stats["records"] += len(batch)
             sub, cell, umi = reads(batch)
@@ -653,30 +655,48 @@ def count_velocity(
             per["r"] = cp.ones(len(per), cp.int32)
             # reads with transcripts, per molecule
             used = cp.unique(rd)
-            mol_parts.append(
+            mp = (
                 cudf.DataFrame({"cell": cell[used], "umi": umi[used], "R": cp.ones(used.size, cp.int32)})
                 .groupby(["cell", "umi"])
                 .agg({"R": "sum"})
                 .reset_index()
-                .to_pandas()
             )
-            parts.append(per.groupby(["cell", "umi", "tm"]).agg(_MT_AGG).reset_index().to_pandas())
+            pp = per.groupby(["cell", "umi", "tm"]).agg(_MT_AGG).reset_index()
             del sub, df, per
-        # A molecule lies in one cell: reduce the rows of a share of the cells at a time
-        mt_all = pd.concat(parts, ignore_index=True) if parts else None
-        mols_all = pd.concat(mol_parts, ignore_index=True) if mol_parts else None
-        del parts, mol_parts
+            if not on_host:
+                held += int(pp.memory_usage().sum() + mp.memory_usage().sum())
+                if held > budget:
+                    on_host = True
+                    parts, mol_parts = [x.to_pandas() for x in parts], [x.to_pandas() for x in mol_parts]
+            if on_host:
+                pp, mp = pp.to_pandas(), mp.to_pandas()
+            parts.append(pp)
+            mol_parts.append(mp)
         outs = []
         for k in ("molecules", "no_shared_transcript", "multigene", "unclassified", *LAYERS):
             stats[k] = 0
-        if mt_all is not None:
+        if parts and not on_host:
+            mt, mols = cudf.concat(parts, ignore_index=True), cudf.concat(mol_parts, ignore_index=True)
+            del parts, mol_parts
+            outs.append(_molecules(mt, mols, tm_gene, stats))
+        elif parts:
+            # A molecule lies in one cell: reduce the rows of a share of the cells at a time
+            mt_all = pd.concat(parts, ignore_index=True)
+            mols_all = pd.concat(mol_parts, ignore_index=True)
+            del parts, mol_parts
             free, _ = cp.cuda.runtime.memGetInfo()
             n_buckets = int(min(max(1, -(-mt_all.memory_usage().sum() * _BUCKET_FACTOR // free)), len(cells)))
-            mt_bucket = mt_all["cell"].to_numpy() % n_buckets
-            mol_bucket = mols_all["cell"].to_numpy() % n_buckets
+            # rows grouped by bucket once (a radix sort on small integers), then sliced
+            sliced = []
+            for t in (mt_all, mols_all):
+                bucket = (t["cell"].to_numpy() % n_buckets).astype(np.int16)
+                order = np.argsort(bucket, kind="stable")
+                bounds = np.searchsorted(bucket[order], np.arange(n_buckets + 1))
+                sliced.append((t.take(order), bounds))
+            (mt_all, mt_b), (mols_all, mol_b) = sliced
             for b in range(n_buckets):
-                mt = cudf.from_pandas(mt_all[mt_bucket == b])
-                mols = cudf.from_pandas(mols_all[mol_bucket == b])
+                mt = cudf.from_pandas(mt_all.iloc[mt_b[b] : mt_b[b + 1]])
+                mols = cudf.from_pandas(mols_all.iloc[mol_b[b] : mol_b[b + 1]])
                 outs.append(_molecules(mt, mols, tm_gene, stats))
             del mt_all, mols_all
         outs = [o for o in outs if len(o)]
