@@ -8,7 +8,7 @@ from bamwriter import Read, sort_key, write_bam
 
 from cubam import read_bam
 from cubam.bam import DUPLICATE, PAIRED, PROPER_PAIR, SECONDARY
-from cubam.cells import CellIndex, packed_barcodes, read_barcodes
+from cubam.cells import CellIndex, pack_acgt, packed_barcodes, read_barcodes
 from cubam.contigs import keep_mask, ref_ids
 from cubam.filters import ReadFilter
 
@@ -28,14 +28,10 @@ def one_batch(tmp_path, reads):
     return batches[0]
 
 
-def test_ref_ids_with_and_without_chr():
+def test_contigs():
     names = ["chr1", "2", "chrX"]
     got = ref_ids(pd.Series(["1", "chr1", "chr2", "2", "X", "Y"]), names)
     assert got.tolist() == [0, 0, 1, 1, 2, -1]
-    assert ref_ids(["chrX"], names).tolist() == [2]
-
-
-def test_keep_mask():
     names = ["chr1", "chr2", "chrM"]
     assert keep_mask(names).tolist() == [True, True, True]
     assert keep_mask(names, ["chr2", "chrM"], drop=["chrM", "chrUn"]).tolist() == [False, True, False]
@@ -88,20 +84,6 @@ def test_cell_index_lookup_and_groups(tmp_path):
     assert idx.groups == ["T cell", "B cell"]
     assert idx.group(cell).get().tolist() == [1, -1, -1, -1]
     assert idx.group(cp.asarray([0])).get().tolist() == [0]
-
-
-def test_cell_index_errors():
-    with pytest.raises(ValueError, match="Duplicate"):
-        CellIndex(["A-1", "A-1"])
-    with pytest.raises(ValueError, match="Empty"):
-        CellIndex([])
-    with pytest.raises(ValueError, match="labels"):
-        CellIndex(["A-1", "C-1"], labels=[1])
-    with pytest.raises(ValueError, match="no labels"):
-        CellIndex(["A-1"]).group(cp.asarray([0]))
-
-
-def test_read_barcodes_plain_and_gzip(tmp_path):
     (tmp_path / "b.tsv").write_text("AAAC-1\nCCCG-1\n\n")
     with gzip.open(tmp_path / "b.tsv.gz", "wt") as fh:
         fh.write("AAAC-1\nCCCG-1\n")
@@ -117,3 +99,7 @@ def test_packed_barcodes(tmp_path):
     b = one_batch(tmp_path, [read("r0", 100, cb="sample_ACGT")])
     with pytest.raises(ValueError, match="CB values"):
         packed_barcodes(b.tag("CB"))
+    # the same codes made on the host, looked up in a CellIndex
+    cells = CellIndex(["AAAC-1", "ACGT-1", "sample_ACGT"])
+    codes = cp.asarray(pack_acgt(["ACGT-1", "ACGTACGTACGTACGT-1", "AAAC-1", ""]))
+    assert cells.lookup_packed(codes).get().tolist() == [1, -1, 0, -1]

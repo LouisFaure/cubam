@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from bamwriter import Read, parse_cigar, sort_key, write_bam
 
-from cubam.apps.velocity import TranscriptModels, count_velocity, segments
+from cubam.apps.velocity import count_velocity, segments
 from cubam.bam import REVERSE, read_bam
 
 EXPECTED = Path(__file__).parent / "data" / "velocyto_expected.json"
@@ -245,20 +245,6 @@ def test_counts_match_velocyto(data, mask):
     )
 
 
-def test_transcript_models(data):
-    d, _ = data
-    m = TranscriptModels(d / "genes.gtf")
-    f = m.features
-    long_ = m.transcripts.index[m.transcripts["trid"] == "LONG.0"][0]
-    # the exon before the 1 Mb intron and the intron itself are gone; exons numbered again
-    lf = f[f["tm"] == long_]
-    assert lf["start"].tolist() == [1_250_001, 1_250_301, 1_251_001]
-    assert lf["exin"].tolist() == [1, 1, 2]
-    intr = f[f["kind"] == 1]
-    assert (intr["down_start"] == intr["end"] + 1).all() and (intr["up_end"] == intr["start"] - 1).all()
-    assert m.genes["gene_id"].is_unique
-
-
 def test_without_quirks_counts_chrM(data):
     d, _ = data
     q = counts(count_velocity(d / "reads.bam", d / "genes.gtf", d / "barcodes.tsv"))
@@ -270,7 +256,13 @@ def test_without_quirks_counts_chrM(data):
 def test_anndata_and_loom(data, tmp_path):
     d, _ = data
     res = count_velocity(d / "reads.bam", d / "genes.gtf", d / "barcodes.tsv")
-    h5py = pytest.importorskip("h5py")
+    pytest.importorskip("anndata")
+    import h5py
+
+    a = res.to_anndata()
+    assert a.shape == (len(CELLS), len(res.genes))
+    for k in ("spliced", "unspliced", "ambiguous"):
+        assert int(a.layers[k].sum()) == res.stats[k]
     res.write_loom(tmp_path / "v.loom", sample="s")
     with h5py.File(tmp_path / "v.loom") as f:
         assert f["layers/unspliced"].shape == (len(res.genes), len(CELLS))

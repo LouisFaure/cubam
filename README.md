@@ -165,7 +165,7 @@ from cubam.apps.features import count_features
 genes = IntervalIndex.from_gtf("genes.gtf", feature="exon", group_by="gene_id")  # or feature="gene"
 res = count_features("gex_possorted_bam.bam", genes, "barcodes.tsv.gz", umi_tag="UB", strand="sense")
 res.write_mtx("counts/")  # matrix.mtx.gz, barcodes.tsv.gz, features.tsv.gz
-adata = res.to_anndata()  # needs anndata and scipy
+adata = res.to_anndata()  # needs the anndata extra
 ```
 
 `IntervalIndex` cuts the genome at every start and end of the intervals of
@@ -200,8 +200,8 @@ several genes.
 from cubam.apps.velocity import count_velocity
 
 res = count_velocity("gex_possorted_bam.bam", "genes.gtf", "barcodes.tsv.gz")  # mask="rmsk.gtf" as velocyto -m
-adata = res.to_anndata()  # layers spliced, unspliced, ambiguous (needs anndata and scipy)
-res.write_loom("sample.loom", sample="sample")  # as velocyto writes it (needs h5py)
+adata = res.to_anndata()  # layers spliced, unspliced, ambiguous (needs the anndata extra)
+res.write_loom("sample.loom", sample="sample")  # as velocyto writes it (needs the anndata extra)
 ```
 
 The rules are those of `velocyto run` with its default logic
@@ -262,10 +262,11 @@ Reading the GTF takes 7 s more.
 ## Development
 
 ```bash
-uv sync --extra rapids-cu12 --extra bigwig
-uv run --extra rapids-cu12 --extra bigwig pytest
+uv sync --extra rapids-cu12 --extra bigwig --extra anndata
+uv run --extra rapids-cu12 --extra bigwig --extra anndata pytest
 ```
 
 The tests write small BAM files with a pure-Python writer (`tests/bamwriter.py`)
-and need a GPU. The bigwig tests read files back with pyBigWig, and are
-skipped without it.
+and need a GPU. The bigwig tests read files back with pyBigWig, and the
+AnnData and loom outputs need the `anndata` extra; those tests are skipped
+without them.

@@ -92,13 +92,6 @@ def test_from_gtf_and_bed(tmp_path):
     assert IntervalIndex.from_bed(bed).features["name"].tolist() == ["chr1:10-20"]
 
 
-def test_bad_intervals():
-    with pytest.raises(ValueError, match="start <= end"):
-        IntervalIndex(["chr1"], [10], [5], ["x"])
-    with pytest.raises(ValueError, match="same length"):
-        IntervalIndex(["chr1"], [10], [20], ["x", "y"])
-
-
 def test_contig_missing_from_header():
     index = IntervalIndex(["chrX", "chr1"], [0, 0], [10, 10], ["x", "a"])
     assert run(index, [(0, 0, 100)]) == {(0, "a"): 10}

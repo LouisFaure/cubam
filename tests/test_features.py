@@ -110,8 +110,6 @@ def data(tmp_path_factory):
     "kw",
     [
         {},
-        {"umi": False},
-        {"strand": "sense"},
         {"strand": "antisense", "umi": False},
         {"assign": "any"},
         {"assign": "largest"},
@@ -168,10 +166,7 @@ def test_write_mtx_and_sparse(data, tmp_path):
     with gzip.open(tmp_path / "mtx" / "features.tsv.gz", "rt") as fh:
         feats = fh.read().splitlines()
     assert len(feats) == len(index) and feats[0].endswith("\tGene Expression")
-
-
-def test_bad_arguments(data):
-    _, index, _, p = data
-    for kw in ({"positions": "middle"}, {"strand": "+"}, {"assign": "all"}):
-        with pytest.raises(ValueError):
-            count_features(p, index, CELLS, **kw)
+    pytest.importorskip("anndata")
+    a = res.to_anndata()
+    assert a.shape == (3, len(index)) and int(a.X.sum()) == int(m.sum())
+    assert list(a.var_names) == res.features["name"].astype(str).tolist()

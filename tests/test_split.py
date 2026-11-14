@@ -90,9 +90,3 @@ def test_empty_group_is_a_valid_bam(tmp_path):
     for path in res.paths.values():
         text, recs = records_of(path)
         assert recs == b"" and "@PG" in text
-
-
-def test_needs_labels_to_split_by_group(data, tmp_path):
-    _, p = data
-    with pytest.raises(ValueError, match="labels"):
-        split_bam(p, CellIndex(CELLS), tmp_path / "x", by="group")

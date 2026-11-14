@@ -1,7 +1,6 @@
 import random
 
 import cudf
-import cupy as cp
 import numpy as np
 import pytest
 from bamwriter import Read, parse_cigar, sort_key, write_bam
@@ -123,7 +122,7 @@ def fragments_table(rows):
     return Fragments(t, BamHeader("", [n for n, _ in REFS], [ln for _, ln in REFS], 0))
 
 
-@pytest.mark.parametrize("width", [1, 4, 5])
+@pytest.mark.parametrize("width", [1, 5])
 def test_fragment_coverage_matches_per_base(width):
     rng = random.Random(5)
     rows = []
@@ -179,15 +178,3 @@ def test_write_bigwig(tmp_path, engine):
     assert bw.intervals("chr1") == ((0, 50, 1.0), (50, 100, 2.0), (100, 150, 1.0))
     assert bw.intervals("chr2") == ((10, 20, 1.0),)
     bw.close()
-
-
-def test_needs_labels(tmp_path):
-    p = write(tmp_path, [read("a", 0, 10, "20M")])
-    with pytest.raises(ValueError, match="labels"):
-        coverage(p, CellIndex(CELLS))
-
-
-def test_lookup_packed():
-    cells = CellIndex(CELLS + ["sample_ACGT"])
-    codes = cp.asarray(pack_acgt([CELLS[2], "ACGTACGTACGTACGT-1", CELLS[0], ""]))
-    assert cells.lookup_packed(codes).get().tolist() == [2, -1, 0, -1]

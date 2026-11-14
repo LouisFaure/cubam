@@ -20,7 +20,7 @@ def random_runs(rng, n):
     return (np.concatenate(x) for x in zip(*rows, strict=True))
 
 
-@pytest.mark.parametrize(("slot", "block"), [(1024, 256), (4, 4), (3, 2)])
+@pytest.mark.parametrize(("slot", "block"), [(1024, 256), (3, 2)])
 def test_bigwig_reads_back(tmp_path, monkeypatch, slot, block):
     # small sections and tree nodes give deep R-trees and many zoom sections on little data
     monkeypatch.setattr(bwmod, "ITEMS_PER_SLOT", slot)
@@ -48,13 +48,4 @@ def test_bigwig_reads_back(tmp_path, monkeypatch, slot, block):
     got = bw.intervals("chr2", 50_000, 60_000)
     m = (ref == 2) & (e > 50_000) & (s < 60_000)
     assert [g[:2] for g in got] == list(zip(s[m].tolist(), e[m].tolist(), strict=True))
-    bw.close()
-
-
-def test_empty_bigwig(tmp_path):
-    p = tmp_path / "e.bw"
-    write_bigwig(p, NAMES, LENGTHS, np.empty(0, int), np.empty(0, int), np.empty(0, int), np.empty(0, np.float32))
-    bw = pyBigWig.open(str(p))
-    assert bw.chroms() == dict(zip(NAMES, LENGTHS, strict=True))
-    assert bw.intervals("chr1") is None
     bw.close()

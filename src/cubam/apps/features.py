@@ -80,7 +80,7 @@ class FeatureCounts:
         )
 
     def to_anndata(self):
-        """An AnnData of the counts (needs anndata and scipy), cells as obs, features as var."""
+        """An AnnData of the counts (needs the ``anndata`` extra), cells as obs, features as var."""
         import anndata
         import scipy.sparse as sp
 

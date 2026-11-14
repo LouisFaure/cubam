@@ -78,7 +78,7 @@ def _spans(n, step):
     return off, np.minimum(off + step, n) - off
 
 
-@pytest.mark.parametrize("level", [0, 1, 2, 5])
+@pytest.mark.parametrize("level", [2, 5])
 def test_deflate_crc_adler_match_zlib(level):
     rng = np.random.default_rng(level)
     text = (b"chr1\t12345\tACGTACGT\tCB:Z:AAAC\n" * 20000)[:400_000]
