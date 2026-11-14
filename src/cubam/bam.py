@@ -81,6 +81,20 @@ class BamHeader:
                     return field[3:]
         return "unknown"
 
+    def to_bytes(self, text: str | None = None) -> bytes:
+        """The uncompressed BAM header (magic, SAM text, references), with ``text`` in place of the SAM text."""
+        t = (self.text if text is None else text).encode()
+        out = [b"BAM\1", struct.pack("<i", len(t)), t, struct.pack("<i", len(self.names))]
+        for name, length in zip(self.names, self.lengths, strict=True):
+            nb = name.encode() + b"\0"
+            out += [struct.pack("<i", len(nb)), nb, struct.pack("<i", length)]
+        return b"".join(out)
+
+    def require_coordinate_sorted(self, path: str | Path = "BAM") -> None:
+        """Raise unless the header says the records are sorted by coordinate."""
+        if self.sort_order != "coordinate":
+            raise ValueError(f"{path}: not coordinate-sorted (@HD SO:{self.sort_order})")
+
     def lines(self, kind: str) -> list[str]:
         """Header lines of one kind, e.g. ``"@PG"``."""
         return [line for line in self.text.split("\n") if line.startswith(kind + "\t")]
@@ -166,6 +180,7 @@ class Tag:
             raise ValueError(f"A tag name has two characters, not {name!r}")
         n = len(batch)
         self.batch = batch
+        self.name = name
         self.type = cp.empty(n, cp.uint8)
         self.offset = cp.empty(n, cp.int64)
         self.length = cp.empty(n, cp.int32)
@@ -282,6 +297,15 @@ class RecordBatch:
             idx = cp.flatnonzero(idx)
         return RecordBatch(self.data, self.offset[idx], self.header, {k: v[idx] for k, v in self.columns.items()})
 
+    def record_sizes(self):
+        """Bytes of each record, its length field included (int64)."""
+        import cupy as cp
+
+        b = self.data
+        o = self.offset
+        size = b[o].astype(cp.int64) | (b[o + 1].astype(cp.int64) << 8) | (b[o + 2].astype(cp.int64) << 16)
+        return (size | (b[o + 3].astype(cp.int64) << 24)) + 4
+
     def has_flags(self, all_of: int = 0, none_of: int = 0):
         """Records with every flag of ``all_of`` and none of ``none_of``."""
         f = self.flag.astype(np.int32)
@@ -314,6 +338,31 @@ class RecordBatch:
         out = cp.empty(n, cp.int32)
         launch("aligned_len", n, self.data, self.offset, np.int64(n), out)
         return out
+
+    def blocks(self, split_deletions: bool = False):
+        """Aligned blocks of the reads: ``(rec, start, end)``, one row per block, in read order.
+
+        A block is a run of CIGAR M, = and X on the reference, ``[start, end)``
+        0-based. Reference skips (``N``, introns) split blocks. Deletions are
+        part of a block, as in ``bedtools genomecov -split``, unless
+        ``split_deletions``. ``rec`` is the index of the read in this batch.
+        """
+        import cupy as cp
+
+        n = len(self)
+        cnt = cp.zeros(n, cp.int32)
+        dummy64, dummy32 = cp.empty(1, cp.int64), cp.empty(1, cp.int32)
+        args = (self.data, self.offset, np.int64(n), np.int32(split_deletions))
+        launch("blocks", n, *args, np.int32(0), dummy64, cnt, dummy64, dummy32, dummy32)
+        first = cp.zeros(n, cp.int64)
+        if n > 1:
+            first[1:] = cp.cumsum(cnt[:-1], dtype=cp.int64)
+        total = int(first[-1] + cnt[-1]) if n else 0
+        rec = cp.empty(total, cp.int64)
+        start = cp.empty(total, cp.int32)
+        end = cp.empty(total, cp.int32)
+        launch("blocks", n, *args, np.int32(1), first, cnt, rec, start, end)
+        return rec, start, end
 
     def base_at(self, rec, refpos):
         """The base of read ``rec[j]`` at reference position ``refpos[j]`` (0-based).

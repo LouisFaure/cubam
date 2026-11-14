@@ -34,15 +34,16 @@ import pandas as pd
 
 from cubam.bam import (
     DUPLICATE,
-    PAIRED,
-    PROPER_PAIR,
     QC_FAIL,
     SECONDARY,
     UNMAPPED,
     BamHeader,
-    fnv1a,
     read_bam,
 )
+from cubam.cells import CellIndex
+from cubam.contigs import ref_ids
+from cubam.filters import ReadFilter
+from cubam.intervals import IntervalIndex
 
 _BASE = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
 
@@ -84,20 +85,6 @@ def _base_code(alleles: pd.Series) -> np.ndarray:
     """``csp_mplp_base2int`` of the first letter: 0-3 for ACGT, 4 for N, -1 otherwise."""
     first = alleles.fillna("").str[:1].str.upper()
     return first.map(_BASE).fillna(-1).astype(np.int8).to_numpy()
-
-
-def _ref_ids(chroms: pd.Series, names: list[str]) -> np.ndarray:
-    """Reference ids of contig names, with or without a ``chr`` prefix (as cellsnp-lite); -1 if absent."""
-    index = {n: i for i, n in enumerate(names)}
-    out = {}
-    for c in chroms.unique():
-        if c in index:
-            out[c] = index[c]
-        elif c.startswith("chr"):
-            out[c] = index.get(c[3:], -1)
-        else:
-            out[c] = index.get("chr" + c, -1)
-    return chroms.map(out).to_numpy(np.int64)
 
 
 def _infer_allele(bc):
@@ -221,10 +208,7 @@ def count_alleles(
 
     t0 = time.perf_counter()
     header = BamHeader.read(bam)
-    if header.sort_order != "coordinate":
-        raise ValueError(f"{bam}: not coordinate-sorted (@HD SO:{header.sort_order})")
-    if not isinstance(barcodes, list):
-        barcodes = [line.strip() for line in Path(barcodes).read_text().splitlines() if line.strip()]
+    header.require_coordinate_sorted(bam)
     s = read_sites(sites) if not isinstance(sites, pd.DataFrame) else sites.reset_index(drop=True)
     # cellsnp-lite skips records with more than two alleles, or a REF or ALT longer than one base
     ref_s, alt_s = s["ref"].fillna("").astype(str), s["alt"].fillna(".").astype(str)
@@ -234,39 +218,32 @@ def count_alleles(
     if exclude_flags is None:
         exclude_flags = UNMAPPED | SECONDARY | QC_FAIL | (0 if umi_tag else DUPLICATE)
 
-    ref_id = _ref_ids(s["chrom"].astype(str), header.names)
+    read_filter = ReadFilter(min_mapq=min_mapq, exclude=exclude_flags, no_orphan=no_orphan)
+
+    ref_id = ref_ids(s["chrom"].astype(str), header.names)
     found = ref_id >= 0
     key = (ref_id << 32) | (s["pos"].to_numpy(np.int64) - 1)
     order = np.argsort(np.where(found, key, np.iinfo(np.int64).max), kind="stable")
     order = order[found[order]]  # sorted row -> input row
 
-    bc_hash = fnv1a(barcodes)
-    if len(np.unique(bc_hash)) != len(barcodes):
-        raise ValueError("Duplicate barcodes in the barcode list")
-    bc_order = np.argsort(bc_hash)
-
     stats = dict.fromkeys(("records", "reads", "read_sites"), 0)
     with memory_pool():
+        cells_index = CellIndex(barcodes) if isinstance(barcodes, list) else CellIndex.from_file(barcodes)
         site_key = cp.asarray(key[order])
         site_pos = cp.asarray((key[order] & 0xFFFFFFFF).astype(np.int32))
-        bc_sorted = cp.asarray(bc_hash[bc_order])
-        bc_index = cp.asarray(bc_order.astype(np.int32))
-        n_bc = len(barcodes)
+        # each site is a feature of one base, numbered in sorted order
+        sorted_ref, sorted_pos = key[order] >> 32, key[order] & 0xFFFFFFFF
+        chrom = pd.Categorical.from_codes(sorted_ref, categories=pd.Index(header.names))
+        index = IntervalIndex(chrom, sorted_pos, sorted_pos + 1, np.arange(order.size))
         parts = []
         ordinal0 = 0
         for batch in read_bam(bam, chunk_bytes):
             n = len(batch)
             stats["records"] += n
-            f = batch.flag.astype(cp.int32)
-            ok = (batch.ref >= 0) & (batch.mapq >= min_mapq) & ((f & (exclude_flags | UNMAPPED)) == 0)
-            if no_orphan:
-                ok &= ~(((f & PAIRED) != 0) & ((f & PROPER_PAIR) == 0))
-            idx = cp.flatnonzero(ok)
+            idx = cp.flatnonzero(read_filter.mask(batch))
             sub = batch.take(idx)
             del batch
-            h = sub.tag(cell_tag).hash()
-            j = cp.minimum(cp.searchsorted(bc_sorted, h), n_bc - 1)
-            cell = cp.where(bc_sorted[j] == h, bc_index[j], -1)
+            cell = cells_index.lookup(sub.tag(cell_tag))
             keep = (cell >= 0) & (sub.aligned_length() >= min_len)
             if umi_tag:
                 ut = sub.tag(umi_tag)
@@ -283,17 +260,9 @@ def count_alleles(
             if not len(sub):
                 continue
             # (read, site) pairs: the sites in [pos, end) of each read
-            rkey = sub.ref.astype(cp.int64) << 32
-            lo = cp.searchsorted(site_key, rkey | sub.pos.astype(cp.int64))
-            hi = cp.searchsorted(site_key, rkey | sub.end.astype(cp.int64))
-            cnt = hi - lo
-            ends = cp.cumsum(cnt)
-            total = int(ends[-1])
-            if total == 0:
+            rec, site, _ = index.overlaps(header.names, sub.ref, sub.pos, sub.end)
+            if rec.size == 0:
                 continue
-            j = cp.arange(total)
-            rec = cp.searchsorted(ends, j, side="right")
-            site = lo[rec] + (j - (ends[rec] - cnt[rec]))
             base = sub.base_at(rec, site_pos[site])
             good = cp.flatnonzero(base >= 0)
             rec, site, base = rec[good], site[good], base[good]
@@ -376,4 +345,4 @@ def count_alleles(
         cells = cells.sort_values(["site", "cell"]).reset_index(drop=True)
     stats.update(sites=len(s) + n_skipped, sites_skipped=n_skipped, sites_on_contigs=int(found.sum()))
     stats["sites_kept"] = len(out_sites)
-    return AlleleCounts(out_sites, barcodes, cells, stats, time.perf_counter() - t0)
+    return AlleleCounts(out_sites, cells_index.barcodes, cells, stats, time.perf_counter() - t0)

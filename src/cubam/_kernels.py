@@ -67,6 +67,115 @@ __global__ void bgzf_sizes(const unsigned char* b, const long long* start, long 
     isize[i] = (long long)u32(b, s + bs - 4);
 }
 
+// CRC32 (zlib polynomial) of spans, one thread per span; the table is built in shared memory
+__global__ void crc32_spans(const unsigned char* b, const long long* off, const long long* len, long long n,
+                            unsigned int* out) {
+    __shared__ unsigned int table[256];
+    unsigned int t = threadIdx.x;
+    for (unsigned int k = t; k < 256; k += blockDim.x) {
+        unsigned int c = k;
+        for (int j = 0; j < 8; j++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        table[k] = c;
+    }
+    __syncthreads();
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const unsigned char* p = b + off[i];
+    unsigned int c = 0xFFFFFFFFu;
+    for (long long k = 0; k < len[i]; k++) c = table[(c ^ p[k]) & 255] ^ (c >> 8);
+    out[i] = c ^ 0xFFFFFFFFu;
+}
+
+// Adler-32 of spans, one thread per span
+__global__ void adler32_spans(const unsigned char* b, const long long* off, const long long* len, long long n,
+                              unsigned int* out) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const unsigned char* p = b + off[i];
+    unsigned int a = 1, s = 0;
+    long long k = 0, m = len[i];
+    while (k < m) {
+        long long e = k + 5552 < m ? k + 5552 : m;  // the largest run without overflow
+        for (; k < e; k++) { a += p[k]; s += a; }
+        a %= 65521u; s %= 65521u;
+    }
+    out[i] = (s << 16) | a;
+}
+
+// BGZF blocks: header, Deflate payload (or a stored block of the raw data when stored[i]), trailer.
+// One warp per block.
+__global__ void bgzf_frame(const unsigned char* comp, const long long* comp_off, const long long* csize,
+                           const unsigned char* raw, const long long* raw_off, const long long* isize,
+                           const unsigned char* stored, const unsigned int* crc, const long long* out_off,
+                           long long n, unsigned char* out) {
+    long long w = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane = threadIdx.x & 31;
+    if (w >= n) return;
+    unsigned char* d = out + out_off[w];
+    long long is = isize[w];
+    long long pay = stored[w] ? is + 5 : csize[w];
+    long long bs = 18 + pay + 8;
+    if (lane == 0) {
+        const unsigned char h[16] = {31, 139, 8, 4, 0, 0, 0, 0, 0, 255, 6, 0, 66, 67, 2, 0};
+        for (int k = 0; k < 16; k++) d[k] = h[k];
+        d[16] = (bs - 1) & 255; d[17] = (bs - 1) >> 8;
+        unsigned char* tr = d + 18 + pay;
+        unsigned int c = crc[w];
+        for (int k = 0; k < 4; k++) { tr[k] = (c >> (8 * k)) & 255; tr[4 + k] = (is >> (8 * k)) & 255; }
+        if (stored[w]) {
+            d[18] = 1;  // final stored block
+            d[19] = is & 255; d[20] = (is >> 8) & 255; d[21] = ~is & 255; d[22] = (~is >> 8) & 255;
+        }
+    }
+    if (stored[w]) {
+        const unsigned char* s = raw + raw_off[w];
+        for (long long k = lane; k < is; k += 32) d[23 + k] = s[k];
+    } else {
+        const unsigned char* s = comp + comp_off[w];
+        for (long long k = lane; k < pay; k += 32) d[18 + k] = s[k];
+    }
+}
+
+// ------------------------------------------------------------------ bigWig
+
+__device__ __forceinline__ void put32(unsigned char* d, unsigned int v) {
+    d[0] = v & 255; d[1] = (v >> 8) & 255; d[2] = (v >> 16) & 255; d[3] = v >> 24;
+}
+
+// Uncompressed bedGraph sections of a bigWig: a 24-byte header, then 12 bytes per item.
+// One thread per item; the first item of a section writes its header.
+__global__ void bw_data_sections(const int* ref, const int* start, const int* end, const float* value,
+                                 const long long* sec, const long long* sec_first, const long long* sec_count,
+                                 const long long* sec_off, long long n, unsigned char* out) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    long long s = sec[i], k = i - sec_first[s];
+    unsigned char* d = out + sec_off[s];
+    if (k == 0) {
+        long long last = sec_first[s] + sec_count[s] - 1;
+        put32(d, ref[i]); put32(d + 4, start[i]); put32(d + 8, end[last]);
+        put32(d + 12, 0); put32(d + 16, 0);
+        d[20] = 1; d[21] = 0;  // bedGraph
+        d[22] = sec_count[s] & 255; d[23] = (sec_count[s] >> 8) & 255;
+    }
+    unsigned char* it = d + 24 + 12 * k;
+    put32(it, start[i]); put32(it + 4, end[i]); put32(it + 8, __float_as_uint(value[i]));
+}
+
+// Zoom records of a bigWig, 32 bytes each, one thread per record
+__global__ void bw_zoom_records(const int* ref, const int* start, const int* end, const unsigned int* count,
+                                const float* mn, const float* mx, const float* sum, const float* ssq,
+                                const long long* sec, const long long* sec_first, const long long* sec_off,
+                                long long n, unsigned char* out) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    long long s = sec[i];
+    unsigned char* d = out + sec_off[s] + 32 * (i - sec_first[s]);
+    put32(d, ref[i]); put32(d + 4, start[i]); put32(d + 8, end[i]); put32(d + 12, count[i]);
+    put32(d + 16, __float_as_uint(mn[i])); put32(d + 20, __float_as_uint(mx[i]));
+    put32(d + 24, __float_as_uint(sum[i])); put32(d + 28, __float_as_uint(ssq[i]));
+}
+
 // ------------------------------------------------------------------ BAM records
 
 __device__ int reg2bin(int beg, int end) {
@@ -237,6 +346,97 @@ __global__ void aligned_len(const unsigned char* b, const long long* off, long l
         if (op == 0 || op == 7 || op == 8) s += v >> 4;
     }
     out[i] = s;
+}
+
+// Aligned blocks: runs of M, = and X (and D unless split_del) between reference skips (N),
+// and between deletions when split_del. Insertions, soft and hard clips do not break a block.
+// With fill == 0 it counts the blocks of each read into cnt; otherwise it writes them from first[i].
+__global__ void blocks(const unsigned char* b, const long long* off, long long n, int split_del, int fill,
+                       const long long* first, int* cnt, long long* rec, int* start, int* end) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    long long o = off[i];
+    unsigned int lrn = b[o + 12], ncig = u16(b, o + 16);
+    long long cg = o + 36 + lrn;
+    int x = (int)u32(b, o + 8), s = x, k = 0;
+    long long w = fill ? first[i] : 0;
+    for (unsigned int c = 0; c < ncig; c++) {
+        unsigned int v = u32(b, cg + 4LL * c), op = v & 15, l = v >> 4;
+        bool aligned = op == 0 || op == 7 || op == 8 || (op == 2 && !split_del);
+        bool gap = op == 3 || (op == 2 && split_del);
+        if (aligned) {
+            x += l;
+        } else if (gap) {
+            if (x > s) {
+                if (fill) { rec[w + k] = i; start[w + k] = s; end[w + k] = x; }
+                k++;
+            }
+            x += l;
+            s = x;
+        }
+    }
+    if (x > s) {
+        if (fill) { rec[w + k] = i; start[w + k] = s; end[w + k] = x; }
+        k++;
+    }
+    if (!fill) cnt[i] = k;
+}
+
+// Mapped segments as velocyto parses a CIGAR (counter.py, parse_cigar_tuple): 1-based, inclusive.
+// Each M is a segment; an insertion or deletion of up to 3 bases between two M joins them; N, longer
+// deletions and insertions separate segments. With quirks (velocyto's behaviour), only M aligns
+// (= and X neither align nor move the position) and a soft clip moves the position (a 5' clip
+// shifts the segments). spliced[i] is 1 when the CIGAR has an N. Two passes, as blocks.
+__global__ void vcy_segments(const unsigned char* b, const long long* off, long long n, int quirks, int fill,
+                             const long long* first, int* cnt, long long* rec, int* start, int* end,
+                             unsigned char* spliced) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    long long o = off[i];
+    unsigned int lrn = b[o + 12], ncig = u16(b, o + 16);
+    long long cg = o + 36 + lrn;
+    int p = (int)u32(b, o + 8) + 1, k = 0, cs = 0, ce = 0;
+    long long w = fill ? first[i] : 0;
+    bool have = false, join = false, skip = false;
+    for (unsigned int c = 0; c < ncig; c++) {
+        unsigned int v = u32(b, cg + 4LL * c), op = v & 15, l = v >> 4;
+        bool m = op == 0 || (!quirks && (op == 7 || op == 8));
+        if (m) {
+            if (join && have) {
+                ce = p + (int)l - 1;
+            } else {
+                if (have) {
+                    if (fill) { rec[w + k] = i; start[w + k] = cs; end[w + k] = ce; }
+                    k++;
+                }
+                cs = p; ce = p + (int)l - 1; have = true;
+            }
+            join = false;
+            p += l;
+            continue;
+        }
+        join = false;
+        if (op == 3) {
+            skip = true;
+            p += l;
+        } else if (op == 1 || op == 2) {
+            if (l <= 3 && c > 0 && c + 1 < ncig) {
+                unsigned int pv = u32(b, cg + 4LL * (c - 1)) & 15, nx = u32(b, cg + 4LL * (c + 1)) & 15;
+                bool pm = pv == 0 || (!quirks && (pv == 7 || pv == 8));
+                bool nm = nx == 0 || (!quirks && (nx == 7 || nx == 8));
+                join = pm && nm;
+            }
+            if (op == 2) p += l;
+        } else if (op == 4) {
+            if (quirks) p += l;
+        }
+    }
+    if (have) {
+        if (fill) { rec[w + k] = i; start[w + k] = cs; end[w + k] = ce; }
+        k++;
+    }
+    if (!fill) cnt[i] = k;
+    else spliced[i] = skip ? 1 : 0;
 }
 
 // The read base at reference position refpos[j] of read rec[j]: 0-3 for A C G T, 4 for any
