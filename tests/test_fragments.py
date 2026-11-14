@@ -152,6 +152,16 @@ def test_many_chunks(tmp_path, monkeypatch, block, chunk):
     with gzip.open(tmp_path / "f.tsv.gz", "rt") as fh:
         rows = [line.rstrip("\n").split("\t") for line in fh]
     assert {(c, int(s), int(e), b): int(n) for c, s, e, b, n in rows} == expected
+    # without strings per fragment: Arrow with dictionaries, and the counts per barcode
+    a = fr.to_arrow().to_pandas()
+    assert {(r.chrom, r.start, r.end, r.barcode): r.count for r in a.itertuples()} == expected
+    stats = fr.barcode_stats()
+    want = pd.DataFrame([(b, n) for (_, _, _, b), n in expected.items()], columns=["barcode", "n"])
+    want = want.groupby("barcode")["n"].agg(["size", "sum"])
+    got = stats.set_index("barcode").loc[want.index]
+    assert (got["n_unique"].to_numpy() == want["size"].to_numpy()).all()
+    assert (got["n_total"].to_numpy() == want["sum"].to_numpy()).all()
+    assert len(stats) == len(want) and stats["n_unique"].is_monotonic_decreasing
     # coverage from fragments streamed out of the BAM, or from the table in small slices, is the same
     monkeypatch.setattr(coverage_mod, "_TABLE_ROWS", 500)
     cells = CellIndex(barcodes, labels=[f"g{i % 3}" for i in range(len(barcodes))])

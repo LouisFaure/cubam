@@ -271,15 +271,13 @@ def _events(g, ref, start, end):
 _TABLE_ROWS = 8_000_000
 
 
-def _table_parts(table: pd.DataFrame):
-    """Slices of a host fragments table on the GPU, as ``(part, bound)`` like the fragment stream."""
-    import cudf
-
-    rows = _TABLE_ROWS
-    for lo in range(0, len(table), rows):
-        hi = min(lo + rows, len(table))
+def _table_parts(frags):
+    """Slices of a :class:`~cubam.apps.fragments.Fragments` table on the GPU, as ``(part, bound)`` like the stream."""
+    table, hi = frags.table, 0
+    for part in frags.iter_gpu(_TABLE_ROWS):
+        hi += len(part)
         bound = None if hi == len(table) else (int(table["ref"].iat[hi]) << 32) + int(table["start"].iat[hi])
-        yield cudf.from_pandas(table.iloc[lo:hi]), bound
+        yield part, bound
 
 
 def _group_sizes(cells: CellIndex) -> tuple[list, np.ndarray]:
@@ -401,7 +399,7 @@ def fragment_coverage(
     stats: dict = {}
     with memory_pool():
         if isinstance(source, Fragments):
-            header, parts = source.header, _table_parts(source.table)
+            header, parts = source.header, _table_parts(source)
         else:
             header = BamHeader.read(source)
             header.require_coordinate_sorted(source)

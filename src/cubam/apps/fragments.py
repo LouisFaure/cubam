@@ -68,6 +68,11 @@ class Fragments:
     ``table`` is a pandas DataFrame, in host memory, of ``ref`` (index into
     ``header.names``), ``start``, ``end``, ``bc`` (packed barcode, see
     :func:`cubam.bam.unpack_acgt`) and ``count``, sorted by position.
+
+    Other tools take them without strings: :meth:`iter_gpu` gives slices on
+    the GPU, :meth:`barcode_stats` the fragments per barcode, and
+    :meth:`to_arrow` an Arrow table with dictionary-encoded chromosomes and
+    barcodes.
     """
 
     table: object
@@ -77,6 +82,66 @@ class Fragments:
 
     def __len__(self) -> int:
         return len(self.table)
+
+    def iter_gpu(self, rows: int = 8_000_000) -> Iterator:
+        """Slices of ``rows`` rows of :attr:`table` as cuDF DataFrames (integer columns), in order."""
+        import cudf
+
+        for lo in range(0, len(self.table), rows):
+            yield cudf.from_pandas(self.table.iloc[lo : lo + rows])
+
+    def barcode_stats(self) -> pd.DataFrame:
+        """Per barcode: ``barcode`` (name), ``bc`` (packed), ``n_unique`` (fragments) and ``n_total`` (read pairs).
+
+        Sorted by decreasing ``n_unique``, then name.
+        """
+        import cudf
+
+        parts = [
+            t.groupby("bc").agg(n_unique=("count", "size"), n_total=("count", "sum")).reset_index()
+            for t in self.iter_gpu()
+        ]
+        if not parts:
+            return pd.DataFrame(
+                {
+                    "barcode": pd.Series([], dtype=object),
+                    "bc": np.empty(0, np.uint64),
+                    "n_unique": np.empty(0, np.int64),
+                    "n_total": np.empty(0, np.int64),
+                }
+            )
+        g = cudf.concat(parts).groupby("bc").agg({"n_unique": "sum", "n_total": "sum"}).reset_index()
+        g["barcode"] = unpack_acgt(g["bc"].values)
+        g = g.sort_values(["n_unique", "barcode"], ascending=[False, True])
+        out = g[["barcode", "bc", "n_unique", "n_total"]].to_pandas().reset_index(drop=True)
+        return out.astype({"n_unique": np.int64, "n_total": np.int64})
+
+    def to_arrow(self):
+        """A pyarrow Table of ``chrom``, ``start``, ``end``, ``barcode``, ``count``.
+
+        ``chrom`` and ``barcode`` are dictionary-encoded (integer codes and
+        the names once), so no string is built per fragment. Barcode codes
+        follow :meth:`barcode_stats`. Pandas, polars and DuckDB read it as is.
+        """
+        import cupy as cp
+        import pyarrow as pa
+
+        stats = self.barcode_stats()
+        order = np.argsort(stats["bc"].to_numpy())
+        sorted_bc = cp.asarray(stats["bc"].to_numpy()[order])
+        rank = cp.asarray(order.astype(np.int32))
+        ids = [rank[cp.searchsorted(sorted_bc, t["bc"].values)].get() for t in self.iter_gpu()]
+        ids = np.concatenate(ids) if ids else np.empty(0, np.int32)
+        t = self.table
+        return pa.table(
+            {
+                "chrom": pa.DictionaryArray.from_arrays(t["ref"].to_numpy(), pa.array(self.header.names)),
+                "start": t["start"].to_numpy(),
+                "end": t["end"].to_numpy(),
+                "barcode": pa.DictionaryArray.from_arrays(ids, pa.array(stats["barcode"].to_numpy(dtype=object))),
+                "count": t["count"].to_numpy(),
+            }
+        )
 
     def to_frame(self, lo: int = 0, hi: int | None = None):
         """Rows ``lo:hi`` as a cuDF DataFrame with ``chrom`` and ``barcode`` as strings (Cell Ranger columns).
@@ -288,7 +353,7 @@ def call_fragments(
     cols = {}
     for k in _DTYPES:  # one column at a time, freeing its parts: host memory peaks near the table size
         v = host.pop(k)
-        cols[k] = np.concatenate(v) if v else np.empty(0, _DTYPES[k])
+        cols[k] = np.concatenate(v).astype(_DTYPES[k], copy=False) if v else np.empty(0, _DTYPES[k])
         del v
     table = pd.DataFrame(cols, copy=False)
     stats["fragments"] = len(table)
