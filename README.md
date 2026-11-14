@@ -41,7 +41,7 @@ page cache. From a network file system, the time is set by the read speed
 | `cubam.apps.coverage` | Coverage tracks per group of cells (clusters), as bigwig | RNA: same depth as `samtools depth` at every base of one group on chr19 of a GEX BAM |
 | `cubam.apps.split` | One BAM file per group of cells or per cell, compressed on the GPU | Same records as `samtools view -D CB:...` for one group of a GEX BAM |
 | `cubam.apps.features` | Counts per cell and feature (genes, repeats, peaks) from a GTF, a BED or a tag | Same counts per gene as featureCounts 2.1.1 on chr19; with the `GX` tag, the same matrix as Cell Ranger ARC 2.0.2 |
-| velocity counts | Spliced, unspliced and ambiguous UMIs per cell and gene | Planned |
+| `cubam.apps.velocity` | Spliced, unspliced and ambiguous molecules per cell and gene, as velocyto | Same counts as velocyto 0.17 (`run`, Permissive10X) on every entry of chr19, chr22 and chrM of a GEX BAM |
 
 ### Fragments
 
@@ -194,16 +194,55 @@ Gene bodies give 3.8% more UMIs than the Cell Ranger matrix: Cell Ranger
 prefers an exon over an intron when genes overlap, and drops UMIs seen on
 several genes.
 
-### Velocity counts (planned)
+### Velocity counts
 
-Recent Cell Ranger versions record intronic and exonic reads in
-`molecule_info.h5`, so this is for BAM files from other pipelines (STARsolo
-without the Velocyto feature, alevin-fry, in-house). The rules follow velocyto: a molecule is
-spliced, unspliced or ambiguous from how the aligned blocks of the reads
-overlap exons and introns. Exon and intron intervals come from a GTF file,
-sorted on the GPU. Each read is checked by binary search, then a group-by on
-(barcode, UMI, gene) gives one class per molecule. Validation: velocyto on
-a Cell Ranger GEX BAM.
+```python
+from cubam.apps.velocity import count_velocity
+
+res = count_velocity("gex_possorted_bam.bam", "genes.gtf", "barcodes.tsv.gz")  # mask="rmsk.gtf" as velocyto -m
+adata = res.to_anndata()  # layers spliced, unspliced, ambiguous (needs anndata and scipy)
+res.write_loom("sample.loom", sample="sample")  # as velocyto writes it (needs h5py)
+```
+
+The rules are those of `velocyto run` with its default logic
+(Permissive10X), read from the velocyto 0.17 source:
+
+- **Transcripts.** Each transcript is its exons and the introns between them.
+  Anything 5' of an intron longer than 1 Mb is dropped.
+- **Reads.** Each read is cut into segments as velocyto parses a CIGAR.
+- **Matching.** A segment matches the exons and introns it overlaps by more
+  than 5 bases, on the read's strand. A read keeps the transcripts with the
+  most matches.
+- **Validated introns.** An intron is validated when an unspliced read
+  crosses one of its ends into the neighbouring exon.
+- **Molecules.** A molecule (cell, UMI) keeps the transcripts that all its
+  reads share. It is then classified spliced, unspliced or ambiguous from
+  which exons, introns and validated introns they cover.
+
+The two passes over the BAM (validated introns first, then the molecules)
+run on the coordinate-sorted BAM, so velocyto's cell-sorted copy is not needed.
+
+By default (`quirks=True`) three behaviours of velocyto are kept, so that
+the counts are the same:
+
+- A 5' soft clip shifts the segments of a read by its length.
+- `chrM` of the BAM becomes `MT` but stays `M` in the GTF, so
+  mitochondrial genes get no counts with Cell Ranger references.
+- The last feature of each contig and strand is never matched.
+
+`quirks=False` drops them. On chr19, chr22 and chrM below, that adds 65,809
+spliced molecules on mitochondrial genes. Elsewhere, spliced molecules
+change by +2.5% and unspliced by −0.6%, mostly from aligning soft-clipped
+reads where they are.
+
+On the GEX BAM of one multiome sample (17,489 cells), on one NVIDIA A100:
+
+| Input | cubam | velocyto 0.17 | Compared |
+|---|---:|---:|---|
+| chr19, chr22, chrM (20M records) | 1.9 s | 10 min 56 s | All 987,889 non-zero entries of the three layers equal |
+| Whole BAM (300M records, 15 GB) | 20 s, 13 GB of GPU memory | | 17.4M molecules |
+
+Reading the GTF takes 7 s more.
 
 ## Open items
 
