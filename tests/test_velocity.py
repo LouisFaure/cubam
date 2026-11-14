@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from bamwriter import Read, parse_cigar, sort_key, write_bam
 
-from cubam.apps.velocity import count_velocity, segments
+from cubam.apps.velocity import RepeatMask, count_velocity, segments
 from cubam.bam import REVERSE, read_bam
 
 EXPECTED = Path(__file__).parent / "data" / "velocyto_expected.json"
@@ -253,21 +253,50 @@ def test_without_quirks_counts_chrM(data):
     assert any("MTGENE" in g for g in nq.values())
 
 
-def test_anndata_and_loom(data, tmp_path):
+@pytest.mark.parametrize("n_repeats", [1, 3])
+def test_repeat_mask_empty_after_quirks(data, tmp_path, n_repeats):
+    d, _ = data
+    path = tmp_path / "single_strand.gtf"
+    path.write_text(
+        "".join(
+            f'chr1\trmsk\texon\t{10 + i * 200}\t{100 + i * 200}\t.\t+\t.\tgene_id "R{i}";\n'
+            for i in range(n_repeats)
+        )
+    )
+    mask = RepeatMask(path)
+    assert mask.intervals.empty
+    assert mask.index.n_intervals == 0
+    assert len(RepeatMask(path, quirks=False).intervals) == n_repeats
+    res = count_velocity(d / "reads.bam", d / "genes.gtf", CELLS, mask=mask)
+    assert counts(res) == json.loads(EXPECTED.read_text())["plain"]
+    assert res.stats["masked"] == 0
+
+
+def test_anndata_and_h5ad(data, tmp_path):
     d, _ = data
     res = count_velocity(d / "reads.bam", d / "genes.gtf", d / "barcodes.tsv")
-    pytest.importorskip("anndata")
-    import h5py
+    anndata = pytest.importorskip("anndata")
+    import pandas as pd
+    import scipy.sparse as sp
 
     a = res.to_anndata()
     assert a.shape == (len(CELLS), len(res.genes))
     for k in ("spliced", "unspliced", "ambiguous"):
         assert int(a.layers[k].sum()) == res.stats[k]
-    res.write_loom(tmp_path / "v.loom", sample="s")
-    with h5py.File(tmp_path / "v.loom") as f:
-        assert f["layers/unspliced"].shape == (len(res.genes), len(CELLS))
-        assert int(f["layers/unspliced"][:].sum()) == res.stats["unspliced"]
-        assert f["col_attrs/CellID"][0].decode() == "s:AAACCCAAGAAACACTx"
+    path = tmp_path / "v.h5ad"
+    res.write_h5ad(path)
+    saved = anndata.read_h5ad(path)
+    assert saved.obs_names.tolist() == CELLS
+    a.strings_to_categoricals()
+    pd.testing.assert_frame_equal(saved.var, a.var)
+    assert sp.issparse(saved.X)
+    assert (saved.X != a.X).nnz == 0
+    # Newer AnnData versions also expose X as layers[None].
+    layer_names = {k for k in saved.layers if k is not None}
+    assert layer_names == {"spliced", "unspliced", "ambiguous"}
+    for k in layer_names:
+        assert sp.issparse(saved.layers[k])
+        assert (saved.layers[k] != a.layers[k]).nnz == 0
 
 
 if __name__ == "__main__":  # write velocyto's counts for make_data into EXPECTED

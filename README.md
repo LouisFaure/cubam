@@ -40,7 +40,7 @@ page cache. From a network file system, the time is set by the read speed
 | `cubam.apps.alleles` | Per-cell allele counts at known sites, as cellsnp-lite | Same output files as cellsnp-lite 1.2.3, byte for byte, on the GEX and ATAC BAM of one multiome sample |
 | `cubam.apps.coverage` | Coverage tracks per group of cells (clusters), as bigwig | RNA: same depth as `samtools depth` at every base of one group on chr19 of a GEX BAM |
 | `cubam.apps.split` | One BAM file per group of cells or per cell, compressed on the GPU | Same records as `samtools view -D CB:...` for one group of a GEX BAM |
-| `cubam.apps.features` | Counts per cell and feature (genes, repeats, peaks) from a GTF, a BED or a tag | Same counts per gene as featureCounts 2.1.1 on chr19; with the `GX` tag, the same matrix as Cell Ranger ARC 2.0.2 |
+| `cubam.apps.features` | Counts per cell and feature (genes, repeats, peaks) from a GTF, a BED or a tag | Same counts per gene as featureCounts 2.1.1 on chr19. With the `GX` tag, the same matrix as Cell Ranger ARC 2.0.2 |
 | `cubam.apps.velocity` | Spliced, unspliced and ambiguous molecules per cell and gene, as velocyto | Same counts as velocyto 0.17 (`run`, Permissive10X) on every entry of a whole GEX BAM |
 
 ### Fragments
@@ -168,13 +168,15 @@ adata = res.to_anndata()  # needs the anndata extra
 ```
 
 `IntervalIndex` cuts the genome at every start and end of the intervals of
-a GTF or BED file, so that each segment between two cuts holds a fixed set
-of features; a read is matched to features with two binary searches. The
-rules per read are those of featureCounts: the aligned blocks of the read
-(or its 5' or 3' end) must overlap a feature by `min_overlap` bases, on the
-same strand with `strand="sense"`, and `assign` picks the features of the
-read (`"unique"`: exactly one, `"any"`: each, `"largest"`: the one with the
-most bases). With `umi_tag`, a (cell, UMI, feature) counts once.
+a GTF or BED file. Each segment between two cuts holds a fixed set of
+features. Two binary searches match a read to features.
+
+The rules per read are those of featureCounts. The aligned blocks (or the
+5' or 3' end) must overlap a feature by `min_overlap` bases.
+`strand="sense"` requires the read and feature to share a strand.
+`assign` picks exactly one feature (`"unique"`), every matching feature
+(`"any"`), or the feature with the most overlapping bases (`"largest"`).
+With `umi_tag`, a (cell, UMI, feature) counts once.
 
 Features can also come from a tag: `count_features(bam, "GX", ...)`
 counts the gene Cell Ranger gave each read. `where` adds a test on the
@@ -200,31 +202,31 @@ from cubam.apps.velocity import count_velocity
 
 res = count_velocity("gex_possorted_bam.bam", "genes.gtf", "barcodes.tsv.gz")  # mask="rmsk.gtf" as velocyto -m
 adata = res.to_anndata()  # layers spliced, unspliced, ambiguous (needs the anndata extra)
-res.write_loom("sample.loom", sample="sample")  # as velocyto writes it (needs the anndata extra)
+res.write_h5ad("sample.h5ad")  # cells × genes with all three velocity layers
 ```
 
-The rules are those of `velocyto run` with its default logic
+The rules are those of `velocyto run` with the default logic
 (Permissive10X), read from the velocyto 0.17 source:
 
-- **Transcripts.** Each transcript is its exons and the introns between them.
+- **Transcripts.** Each transcript comprises exons and the introns between them.
   Anything 5' of an intron longer than 1 Mb is dropped.
 - **Reads.** Each read is cut into segments as velocyto parses a CIGAR.
 - **Matching.** A segment matches the exons and introns it overlaps by more
-  than 5 bases, on the read's strand. A read keeps the transcripts with the
-  most matches.
+  than 5 bases, on the same strand as the read. A read keeps the transcripts
+  with the most matches.
 - **Validated introns.** An intron is validated when an unspliced read
-  crosses one of its ends into the neighbouring exon.
-- **Molecules.** A molecule (cell, UMI) keeps the transcripts that all its
-  reads share. It is then classified spliced, unspliced or ambiguous from
-  which exons, introns and validated introns they cover.
+  crosses either end of the intron into the neighbouring exon.
+- **Molecules.** A molecule (cell, UMI) keeps the transcripts shared by all
+  reads of the molecule. It is then classified spliced, unspliced or
+  ambiguous from which exons, introns and validated introns they cover.
 
 The two passes over the BAM (validated introns first, then the molecules)
-run on the coordinate-sorted BAM, so velocyto's cell-sorted copy is not needed.
+run on the coordinate-sorted BAM. No cell-sorted copy is needed.
 
 By default (`quirks=True`) three behaviours of velocyto are kept, so that
 the counts are the same:
 
-- A 5' soft clip shifts the segments of a read by its length.
+- A 5' soft clip shifts the segments of a read by the clip length.
 - `chrM` of the BAM becomes `MT` but stays `M` in the GTF, so
   mitochondrial genes get no counts with Cell Ranger references.
 - The last feature of each contig and strand is never matched.
@@ -239,7 +241,7 @@ On the GEX BAM of one multiome sample (17,489 cells), on one NVIDIA A100:
 | Input | cubam | velocyto 0.17 | Compared |
 |---|---:|---:|---|
 | chr19, chr22, chrM (20M records) | 1.9 s | 10 min 56 s | All 987,889 non-zero entries of the three layers equal |
-| Whole BAM (300M records, 15 GB) | 20 s, 13 GB of GPU memory | 1 h 57 min (6 threads, with its sort) | All 11,934,461 non-zero entries equal |
+| Whole BAM (300M records, 15 GB) | 20 s, 13 GB of GPU memory | 1 h 57 min (6 threads, including sorting) | All 11,934,461 non-zero entries equal |
 
 Reading the GTF takes 7 s more.
 
@@ -267,5 +269,5 @@ uv run --extra rapids-cu12 --extra anndata pytest
 
 The tests write small BAM files with a pure-Python writer (`tests/bamwriter.py`)
 and need a GPU. The bigwig tests read files back with pyBigWig (in the
-`test` group). The AnnData and loom tests need the `anndata` extra and are
+`test` group). The AnnData and h5ad tests need the `anndata` extra and are
 skipped without it.

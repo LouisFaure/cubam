@@ -90,3 +90,30 @@ def test_empty_group_is_a_valid_bam(tmp_path):
     for path in res.paths.values():
         text, recs = records_of(path)
         assert recs == b"" and "@PG" in text
+
+
+@pytest.mark.parametrize("alias", ["same_path", "symlink", "hardlink"])
+def test_split_rejects_input_as_output(tmp_path, alias):
+    p = write_bam(
+        tmp_path / "sample.bam",
+        REFS,
+        [Read("r", ref=0, pos=10, cigar="20M", tags=[("CB", "Z", CELLS[0])])],
+    )
+    original = p.read_bytes()
+    outdir = tmp_path
+    if alias != "same_path":
+        outdir = tmp_path / "out"
+        outdir.mkdir()
+        output = outdir / "sample.bam"
+        if alias == "symlink":
+            output.symlink_to(p)
+        else:
+            output.hardlink_to(p)
+    earlier = outdir / "earlier.bam"
+    earlier.write_bytes(b"existing output")
+    cells = CellIndex(CELLS[:3], labels=["earlier", "new", "sample"])
+    with pytest.raises(ValueError, match="input BAM"):
+        split_bam(p, cells, outdir)
+    assert p.read_bytes() == original
+    assert earlier.read_bytes() == b"existing output"
+    assert not (outdir / "new.bam").exists()

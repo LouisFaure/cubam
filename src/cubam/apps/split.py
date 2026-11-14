@@ -175,6 +175,9 @@ def split_bam(
             stem += "_"
         used.add(stem)
         paths.append(outdir / f"{stem}.bam")
+    for path in paths:
+        if path.exists() and path.samefile(bam):
+            raise ValueError(f"Output path refers to the input BAM: {path}")
     cl = shlex.join([Path(sys.argv[0]).name or "python", *sys.argv[1:]])
     pg = f"@PG\tID:cubam.split_bam\tPN:cubam\tCL:{cl}\tDS:split by {by} on {cell_tag}\n"
     text = header.text if header.text.endswith("\n") or not header.text else header.text + "\n"

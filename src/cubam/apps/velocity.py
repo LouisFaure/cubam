@@ -372,7 +372,7 @@ class RepeatMask:
         self.intervals = pd.DataFrame(
             {"cs": pd.Categorical(ivl_cs[order]), "start": ivl_start[order], "end": ivl_end[order]}
         )
-        if quirks:  # never looked at: the last interval of each contig and strand
+        if quirks and len(self.intervals):  # never looked at: the last interval of each contig and strand
             codes = self.intervals["cs"].cat.codes.to_numpy()
             self.intervals = self.intervals[np.r_[codes[1:] == codes[:-1], False]].reset_index(drop=True)
         self.quirks = quirks
@@ -450,39 +450,9 @@ class Velocity:
         obs = pd.DataFrame(index=pd.Index(self.barcodes, name="barcode"))
         return anndata.AnnData(layers["spliced"].copy(), obs=obs, var=var, layers=layers)
 
-    def write_loom(self, path: str | Path, sample: str = "sample") -> None:
-        """A loom file as velocyto writes (needs h5py): genes as rows, ``CellID`` = ``<sample>:<barcode>x``."""
-        import h5py
-
-        def dense(name):
-            m = np.zeros((len(self.genes), len(self.barcodes)), np.uint32)
-            c = self.counts[self.counts[name] > 0][["cell", "gene", name]].to_pandas()
-            m[c["gene"].to_numpy(), c["cell"].to_numpy()] = c[name].to_numpy()
-            return m
-
-        g = self.genes
-        cells = np.array([f"{sample}:{b.split('-')[0]}x" for b in self.barcodes], dtype=object)
-        with h5py.File(path, "w") as f:
-            kw = {
-                "compression": "gzip",
-                "compression_opts": 2,
-                "chunks": (min(64, len(g)) or 1, min(64, len(cells)) or 1),
-            }
-            spliced = dense("spliced")
-            f.create_dataset("matrix", data=spliced, **kw)
-            for name in LAYERS:
-                f.create_dataset(f"layers/{name}", data=spliced if name == "spliced" else dense(name), **kw)
-            s = h5py.string_dtype()
-            f.create_dataset("row_attrs/Accession", data=g["gene_id"].astype(str).to_numpy(object), dtype=s)
-            f.create_dataset("row_attrs/Gene", data=g["gene_name"].astype(str).to_numpy(object), dtype=s)
-            f.create_dataset("row_attrs/Chromosome", data=g["chrom"].astype(str).to_numpy(object), dtype=s)
-            f.create_dataset("row_attrs/Strand", data=g["strand"].astype(str).to_numpy(object), dtype=s)
-            f.create_dataset("row_attrs/Start", data=g["start"].to_numpy(np.int64))
-            f.create_dataset("row_attrs/End", data=g["end"].to_numpy(np.int64))
-            f.create_dataset("col_attrs/CellID", data=cells, dtype=s)
-            f.create_group("col_graphs")
-            f.create_group("row_graphs")
-            f.attrs["LOOM_SPEC_VERSION"] = "3.0.0"
+    def write_h5ad(self, path: str | Path) -> None:
+        """Write cells × genes with all three velocity layers (needs the ``anndata`` extra)."""
+        self.to_anndata().write_h5ad(path)
 
 
 def _read_segments(sub: RecordBatch, quirks: bool):
