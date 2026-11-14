@@ -41,7 +41,7 @@ page cache. From a network file system, the time is set by the read speed
 | `cubam.apps.coverage` | Coverage tracks per group of cells (clusters), as bigwig | RNA: same depth as `samtools depth` at every base of one group on chr19 of a GEX BAM |
 | `cubam.apps.split` | One BAM file per group of cells or per cell, compressed on the GPU | Same records as `samtools view -D CB:...` for one group of a GEX BAM |
 | `cubam.apps.features` | Counts per cell and feature (genes, repeats, peaks) from a GTF, a BED or a tag | Same counts per gene as featureCounts 2.1.1 on chr19; with the `GX` tag, the same matrix as Cell Ranger ARC 2.0.2 |
-| `cubam.apps.velocity` | Spliced, unspliced and ambiguous molecules per cell and gene, as velocyto | Same counts as velocyto 0.17 (`run`, Permissive10X) on every entry of chr19, chr22 and chrM of a GEX BAM |
+| `cubam.apps.velocity` | Spliced, unspliced and ambiguous molecules per cell and gene, as velocyto | Same counts as velocyto 0.17 (`run`, Permissive10X) on every entry of a whole GEX BAM |
 
 ### Fragments
 
@@ -240,7 +240,7 @@ On the GEX BAM of one multiome sample (17,489 cells), on one NVIDIA A100:
 | Input | cubam | velocyto 0.17 | Compared |
 |---|---:|---:|---|
 | chr19, chr22, chrM (20M records) | 1.9 s | 10 min 56 s | All 987,889 non-zero entries of the three layers equal |
-| Whole BAM (300M records, 15 GB) | 20 s, 13 GB of GPU memory | | 17.4M molecules |
+| Whole BAM (300M records, 15 GB) | 20 s, 13 GB of GPU memory | 1 h 57 min (6 threads, with its sort) | All 11,934,461 non-zero entries equal |
 
 Reading the GTF takes 7 s more.
 
