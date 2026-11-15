@@ -35,7 +35,7 @@ _HEADER, _TRAILER = 18, 8
 _MAX_ISIZE = 1 << 16
 
 
-class ChunkReader:
+class _ChunkReader:
     """Chunks of a file read ahead into pinned buffers by a background thread.
 
     Each chunk is read by ``n_threads`` parallel ``pread`` calls of ``piece``
@@ -215,7 +215,7 @@ def _check(rc: int, what: str) -> None:
         raise RuntimeError(f"nvCOMP {what} failed (status {rc})")
 
 
-def deflate_spans(data, off, size, level: int = 1, max_chunks: int = 4096):
+def _deflate_spans(data, off, size, level: int = 1, max_chunks: int = 4096):
     """Raw Deflate streams of ``data[off[i] : off[i] + size[i]]`` (cupy), each at most 65,536 bytes.
 
     ``level`` is the nvCOMP Deflate algorithm, 0 (entropy coding only) to 5.
@@ -328,12 +328,12 @@ def _checksum(kernel: str, data, off, size):
     return out
 
 
-def crc32_spans(data, off, size):
+def _crc32_spans(data, off, size):
     """CRC32 (as ``zlib.crc32``) of ``data[off[i] : off[i] + size[i]]``, one uint32 per span."""
     return _checksum("crc32_spans", data, off, size)
 
 
-def adler32_spans(data, off, size):
+def _adler32_spans(data, off, size):
     """Adler-32 (as ``zlib.adler32``) of ``data[off[i] : off[i] + size[i]]``, one uint32 per span."""
     return _checksum("adler32_spans", data, off, size)
 
@@ -344,7 +344,7 @@ EOF_BLOCK = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000
 BLOCK_DATA = 0xFF00
 
 
-def bgzf_compress(data, level: int = 2, block_off=None, block_size=None, return_offsets: bool = False):
+def _bgzf_compress(data, level: int = 2, block_off=None, block_size=None, return_offsets: bool = False):
     """``data`` (cupy uint8) as BGZF blocks, without the EOF block (cupy uint8).
 
     Blocks hold ``BLOCK_DATA`` bytes each, or the spans ``block_off``,
@@ -363,8 +363,8 @@ def bgzf_compress(data, level: int = 2, block_off=None, block_size=None, return_
     if off.size == 0:
         empty = cp.empty(0, cp.uint8)
         return (empty, cp.empty(0, cp.int64)) if return_offsets else empty
-    comp, comp_off, csize = deflate_spans(data, off, isize, level)
-    crc = crc32_spans(data, off, isize)
+    comp, comp_off, csize = _deflate_spans(data, off, isize, level)
+    crc = _crc32_spans(data, off, isize)
     stored = (csize + 26 > 1 << 16).astype(cp.uint8)
     bsize = 26 + cp.where(stored.astype(cp.bool_), isize + 5, csize)
     out_off = cp.cumsum(bsize) - bsize
@@ -425,7 +425,7 @@ class BgzfWriter:
         buf = cp.concatenate(self._pending) if len(self._pending) > 1 else self._pending[0]
         cut = int(buf.size) if final else int(buf.size) // BLOCK_DATA * BLOCK_DATA
         if cut:
-            self._fh.write(bgzf_compress(buf[:cut], self.level).get().tobytes())
+            self._fh.write(_bgzf_compress(buf[:cut], self.level).get().tobytes())
         rest = buf[cut:]
         self._pending = [rest.copy()] if rest.size else []
         self._n = int(rest.size)
@@ -446,7 +446,7 @@ class BgzfWriter:
         self.close()
 
 
-def inflate_blocks(buf, eof: bool):
+def _inflate_blocks(buf, eof: bool):
     """Inflate the complete BGZF blocks of ``buf`` (cupy uint8, starting at a block).
 
     Returns the inflated data and the number of bytes of ``buf`` used. When
@@ -527,14 +527,14 @@ def inflate_chunks(path: str | Path, chunk_bytes: int | None = None, **reader_kw
 
     chunk_bytes = chunk_bytes or auto_chunk_bytes()
 
-    reader = ChunkReader(path, chunk_bytes, **reader_kw)
+    reader = _ChunkReader(path, chunk_bytes, **reader_kw)
     carry = cp.empty(0, cp.uint8)  # compressed bytes of the incomplete last block
     try:
         for slot, nbytes, eof in reader:
             buf = cp.empty(carry.size + nbytes, cp.uint8)
             buf[: carry.size] = carry
             buf[carry.size :].set(reader.host(slot)[:nbytes])
-            data, used = inflate_blocks(buf, eof)  # synchronises: the copy is done
+            data, used = _inflate_blocks(buf, eof)  # synchronises: the copy is done
             reader.release(slot)
             carry = buf[used:].copy()
             del buf

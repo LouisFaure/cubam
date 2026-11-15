@@ -9,7 +9,7 @@ from cubam import read_bam
 from cubam.apps.coverage import coverage, fragment_coverage
 from cubam.apps.fragments import Fragments
 from cubam.bam import DUPLICATE, REVERSE, BamHeader
-from cubam.cells import CellIndex, pack_acgt
+from cubam.cells import CellIndex, _pack_acgt
 
 REFS = [("chr1", 20_000), ("chr2", 5_000), ("chrM", 3_000)]
 CELLS = ["AAAACCCCGGGGTTTT-1", "CCCCGGGGTTTTAAAA-1", "GGGGTTTTAAAACCCC-1", "TTTTAAAACCCCGGGG-1"]
@@ -115,7 +115,7 @@ def fragments_table(rows):
             "ref": np.array([r[0] for r in rows], np.int32),
             "start": np.array([r[1] for r in rows], np.int32),
             "end": np.array([r[2] for r in rows], np.int32),
-            "bc": pack_acgt([r[3] for r in rows]),
+            "bc": _pack_acgt([r[3] for r in rows]),
             "count": np.ones(len(rows), np.int32),
         }
     )

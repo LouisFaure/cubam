@@ -1,0 +1,142 @@
+/* cubam documentation: custom styles on top of the scverse-doc theme, after gatac's.
+   The link colour comes from the theme's `accent` option in conf.py. */
+
+/* ── Brand colours ───────────────────────────────────────────────────────── */
+:root {
+    /* Links follow each mode's temperature: blue on light (4.8:1 on white); on
+       the sepia of dark mode, a softer shade of the amber `accent` in conf.py
+       (8.0:1). The theme derives the text shade and the tints from the accent: pin them. */
+    --scverse-color-accent-text: light-dark(#176de8, #d69e64);
+    --scverse-color-accent-decorative: light-dark(#176de8, #e68c2c);
+    --cubam-green: #73b301; /* logo green */
+    --cubam-green-dark: #5a8c00;
+    --pst-color-secondary: var(--cubam-green);
+}
+
+/* Hovered links keep their hue, darker on light and lighter on dark. The theme
+   sets its hover colour on html[data-theme], which outranks :root, so these do too */
+html[data-theme="light"] {
+    --pst-color-secondary: var(--cubam-green);
+    --pst-color-link-hover: #0f4fa8;
+}
+
+html[data-theme="dark"] {
+    --pst-color-secondary: var(--cubam-green);
+    --pst-color-link-hover: #f7be83;
+}
+
+/* ── Dark mode: sepia ────────────────────────────────────────────────────── */
+/* The theme derives its dark neutrals from a cool blue (oklch hue 245); these
+   are the same steps in a warm brown, a little less bright for the text.
+   pydata-sphinx-theme also sets data-theme="dark" when following the system. */
+html[data-theme="dark"] {
+    --scverse-color-background: oklch(18% 0.012 70);
+    --scverse-color-surface-alt: oklch(21% 0.016 70); /* search field */
+    --scverse-color-surface: oklch(25% 0.02 70); /* inline code, copy buttons */
+    --scverse-color-border-muted: oklch(31% 0.02 70);
+    --scverse-color-border: oklch(41% 0.024 70);
+    --scverse-color-text: oklch(91% 0.018 80);
+    --scverse-color-text-secondary: oklch(80% 0.02 75);
+    --scverse-color-text-muted: oklch(67% 0.022 70);
+    --scverse-color-heading: oklch(86% 0.016 78);
+    --scverse-color-code-bg: oklch(20% 0.014 70);
+    --scverse-color-footer-bg: oklch(22% 0.018 70);
+    --pst-color-on-background: oklch(23% 0.022 70); /* cards */
+}
+
+/* ── Logo ──────────────────────────────────────────────────────────────── */
+/* The theme puts the logo in the sidebar with `height: 100%; width: auto` on an
+   auto-height link. The SVG has a viewBox but no width or height, so it has no
+   size of its own, and some browsers (Safari) draw it zero-wide: size it here. */
+.navbar-brand img {
+    width: 100%;
+    max-width: 15rem;
+    height: auto;
+}
+
+/* ── Primary sidebar width (pydata-sphinx-theme default: 25%) ─────────────── */
+/* 20% of the window, but no less than 14rem: on a laptop-sized window the
+   longest entries ("Coverage per group of cells") then still fit on one line. */
+@media (min-width: 960px) {
+    .bd-sidebar-primary {
+        --pst-sidebar-primary-width: max(20%, 14rem);
+    }
+}
+
+/* ── Primary sidebar spacing: tighter than the theme's ───────────────────── */
+/* Links: 0.25rem above and below in the theme */
+nav.bd-links li > a,
+.bd-sidebar-primary li.has-children > .reference {
+    padding-block: 0.125rem;
+}
+/* The expand arrow of a page with subpages: as tall as its link (30px in the theme) */
+.bd-sidebar-primary li.has-children > details > summary .toctree-toggle {
+    height: calc(1lh + 0.25rem);
+}
+/* Section headings: 1.25rem above, 0.5rem below in the theme */
+nav.bd-links p.caption {
+    margin-top: 0.875rem;
+    margin-bottom: 0.25rem;
+}
+
+/* ── Toctree caption headings (sidebar section labels) ───────────────────── */
+p.caption .caption-text,
+.bd-sidebar-secondary .onthispage {
+    color: var(--cubam-green);
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+/* ── Code ────────────────────────────────────────────────────────────────── */
+div.highlight pre {
+    border-radius: 6px;
+}
+
+code.literal {
+    background-color: var(--pst-color-surface);
+    border: 1px solid var(--pst-color-border);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-size: 0.88em;
+}
+
+html[data-theme="dark"] code.literal {
+    border-color: var(--pst-color-border-muted);
+}
+
+/* ── Back-to-top button ──────────────────────────────────────────────────── */
+#pst-back-to-top {
+    background-color: var(--cubam-green);
+    color: #fff;
+}
+
+#pst-back-to-top:hover {
+    background-color: var(--cubam-green-dark);
+    color: #fff;
+}
+
+#pst-back-to-top:focus-visible {
+    outline-color: var(--cubam-green);
+}
+
+/* ── Footer ──────────────────────────────────────────────────────────────── */
+footer.bd-footer {
+    border-top: 1px solid var(--pst-color-border);
+    font-size: 0.85rem;
+}
+
+/* ── Tables: scroll sideways on narrow screens instead of overflowing ─────── */
+table.docutils {
+    width: 100%;
+    overflow-x: auto;
+    display: block;
+}
+
+/* ── Heading anchor links ─────────────────────────────────────────────────── */
+a.headerlink {
+    color: var(--cubam-green);
+}
+
+a.headerlink:hover {
+    color: var(--cubam-green-dark);
+}

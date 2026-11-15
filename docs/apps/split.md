@@ -3,6 +3,23 @@
 {func}`cubam.apps.split.split_bam` writes one BAM file per group of cells,
 or per cell, in one pass over the input.
 
+::::{tab-set}
+:sync-group: interface
+
+:::{tab-item} Shell
+:sync: shell
+
+```bash
+cubam split atac_possorted_bam.bam --barcodes clusters.csv \
+    -o by_cluster/
+```
+
+See {doc}`../cli/split` for the options.
+:::
+
+:::{tab-item} Python
+:sync: python
+
 ```python
 from cubam.cells import CellIndex
 from cubam.apps.split import split_bam
@@ -10,6 +27,9 @@ from cubam.apps.split import split_bam
 res = split_bam("atac_possorted_bam.bam", CellIndex(barcodes, labels=clusters), "by_cluster/")
 res.paths  # {cluster: Path("by_cluster/<cluster>.bam")}, then samtools index
 ```
+:::
+
+::::
 
 Records keep the order of the input, and each file has the header of the
 input with a `@PG` line. Without labels, or with `by="cell"`, there is one

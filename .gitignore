@@ -7,3 +7,4 @@ dist/
 cufile.log
 uv.lock
 docs/_build/
+docs/api/generated/

@@ -38,6 +38,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from cubam._contigs import keep_mask
 from cubam.bam import (
     DUPLICATE,
     MATE_UNMAPPED,
@@ -52,8 +53,7 @@ from cubam.bam import (
     read_bam,
     unpack_acgt,
 )
-from cubam.cells import packed_barcodes
-from cubam.contigs import keep_mask
+from cubam.cells import _packed_barcodes
 from cubam.filters import ReadFilter
 
 _READ_COLS = ("ref", "pos", "flag", "nref", "npos", "hash", "bc", "five")
@@ -416,7 +416,7 @@ def _fragment_parts(
         sub = batch.take(read_filter.mask(batch, keep_ref))
         del batch
         tag = sub.tag(barcode_tag)
-        bc, packable = packed_barcodes(tag)
+        bc, packable = _packed_barcodes(tag)
         acc["no_barcode"] += (~packable).sum()
         sub = sub.take(packable)
         acc["kept_reads"] += len(sub)

@@ -4,6 +4,26 @@
 {func}`cubam.apps.coverage.fragment_coverage` build one coverage track per
 group of cells (clusters, cell types) and write them as bigWig files.
 
+::::{tab-set}
+:sync-group: interface
+
+:::{tab-item} Shell
+:sync: shell
+
+```bash
+cubam coverage gex_possorted_bam.bam --barcodes clusters.csv \
+    -o tracks/rna
+
+cubam coverage atac_possorted_bam.bam --barcodes clusters.csv --atac \
+    --bin-size 10 -o tracks/atac
+```
+
+See {doc}`../cli/coverage` for the options.
+:::
+
+:::{tab-item} Python
+:sync: python
+
 ```python
 from cubam.cells import CellIndex
 from cubam.apps.coverage import coverage, fragment_coverage
@@ -15,6 +35,9 @@ atac = fragment_coverage("atac_possorted_bam.bam", cells, keep_chroms=primary_co
 rna.write_bigwig("tracks/rna", normalize="cpm")  # one file per group
 atac.write_bigwig("tracks/atac", bin_size=10)
 ```
+:::
+
+::::
 
 ## Rules
 

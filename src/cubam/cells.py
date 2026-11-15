@@ -9,10 +9,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cubam.bam import Tag, fnv1a
+from cubam.bam import Tag, _fnv1a
 
 
-def read_barcodes(path: str | Path) -> list[str]:
+def _read_barcodes(path: str | Path) -> list[str]:
     """Barcodes of a file with one per line (plain or gzip), e.g. ``barcodes.tsv.gz`` of Cell Ranger."""
     path = Path(path)
     with open(path, "rb") as fh:
@@ -40,7 +40,7 @@ class CellIndex:
         self.barcodes = list(barcodes)
         if not self.barcodes:
             raise ValueError("Empty barcode list")
-        h = fnv1a(self.barcodes)
+        h = _fnv1a(self.barcodes)
         if len(np.unique(h)) != len(self.barcodes):
             raise ValueError("Duplicate barcodes in the barcode list")
         order = np.argsort(h)
@@ -59,7 +59,8 @@ class CellIndex:
 
     @classmethod
     def from_file(cls, path: str | Path, labels: Sequence | None = None) -> CellIndex:
-        return cls(read_barcodes(path), labels)
+        """Cells of a file with one barcode per line (plain or gzip), e.g. ``barcodes.tsv.gz`` of Cell Ranger."""
+        return cls(_read_barcodes(path), labels)
 
     def __len__(self) -> int:
         return len(self.barcodes)
@@ -73,14 +74,14 @@ class CellIndex:
         return cp.where(self._sorted[j] == h, self._index[j], -1)
 
     def lookup_packed(self, codes):
-        """Index of the cell of packed barcodes (:func:`packed_barcodes`, the ``bc`` of fragments); -1 if absent.
+        """Index of the cell of packed barcodes (:meth:`~cubam.bam.Tag.packed`, the ``bc`` of fragments); -1 if absent.
 
         Barcodes of the list that do not fit a code match nothing.
         """
         import cupy as cp
 
         if self._packed is None:
-            code = pack_acgt(self.barcodes)
+            code = _pack_acgt(self.barcodes)
             fits = np.flatnonzero(code != 0)
             order = fits[np.argsort(code[fits])]
             self._packed = (cp.asarray(code[order]), cp.asarray(order.astype(np.int32)))
@@ -108,8 +109,8 @@ class CellIndex:
         return cp.where(cell >= 0, self._group[cp.maximum(cell, 0)], -1)
 
 
-def pack_acgt(values: Sequence[str]) -> np.ndarray:
-    """Codes of :meth:`Tag.packed` computed on the host; 0 for a value that does not fit."""
+def _pack_acgt(values: Sequence[str]) -> np.ndarray:
+    """Codes of :meth:`~cubam.bam.Tag.packed` computed on the host; 0 for a value that does not fit."""
     out = np.zeros(len(values), np.uint64)
     base = {"A": 0, "C": 1, "G": 2, "T": 3}
     for i, v in enumerate(values):
@@ -128,8 +129,8 @@ def pack_acgt(values: Sequence[str]) -> np.ndarray:
     return out
 
 
-def packed_barcodes(tag: Tag):
-    """Barcodes packed into uint64 codes (:meth:`Tag.packed`), and whether each read has one.
+def _packed_barcodes(tag: Tag):
+    """Barcodes packed into uint64 codes (:meth:`~cubam.bam.Tag.packed`), and whether each read has one.
 
     For applications that keep every barcode, without a list. Raises when a
     barcode does not fit the code (``[ACGT]{1,24}`` with an optional ``-N``).

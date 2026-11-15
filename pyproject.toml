@@ -22,7 +22,7 @@ dependencies = [
   "numpy>=2",
   "pandas>=2.3",
 ]
-scripts.cubam-cellsnp = "cubam.cellsnp_cli:main"
+scripts.cubam = "cubam.cli:main"
 # cuDF (group-by, strings) and RMM come with RAPIDS. nvCOMP inflates BGZF
 # blocks through its C library (libnvcomp), which libcudf pins too.
 optional-dependencies.rapids-cu12 = [
@@ -34,8 +34,19 @@ optional-dependencies.anndata = [ "anndata>=0.10" ]
 
 [dependency-groups]
 dev = [ "ruff>=0.17" ]
-test = [ "pybigwig>=0.3.22", "pytest>=9" ]
-docs = [ "furo>=2025.9.25", "myst-parser>=4", "sphinx>=8.2", "sphinx-copybutton>=0.5.2" ]
+test = [
+ "pybigwig>=0.3.22",
+ "pytest>=9",
+ "pytest-xdist>=3.8",
+]
+docs = [
+  "myst-parser>=4",
+  "scverse-doc[theme]>=0.5.1 ; python_full_version >= '3.12'",
+  "sphinx>=8.2",
+  "sphinx-argparse>=0.6",
+  "sphinx-copybutton>=0.5.2",
+  "sphinx-design>=0.6",
+]
 
 [tool.hatch]
 version.source = "vcs"

@@ -4,6 +4,23 @@
 and feature: genes from a GTF file, repeats, peaks from a BED file, or the
 gene Cell Ranger gave each read.
 
+::::{tab-set}
+:sync-group: interface
+
+:::{tab-item} Shell
+:sync: shell
+
+```bash
+cubam count gex_possorted_bam.bam --features genes.gtf \
+    --barcodes barcodes.tsv.gz --strand sense -o counts/
+```
+
+See {doc}`../cli/count` for the options.
+:::
+
+:::{tab-item} Python
+:sync: python
+
 ```python
 from cubam.intervals import IntervalIndex
 from cubam.apps.features import count_features
@@ -13,6 +30,9 @@ res = count_features("gex_possorted_bam.bam", genes, "barcodes.tsv.gz", umi_tag=
 res.write_mtx("counts/")  # matrix.mtx.gz, barcodes.tsv.gz, features.tsv.gz
 adata = res.to_anndata()  # needs the anndata extra
 ```
+:::
+
+::::
 
 ## Rules
 

@@ -3,6 +3,24 @@
 {func}`cubam.apps.velocity.count_velocity` counts spliced, unspliced and
 ambiguous molecules per cell and gene, as `velocyto run` does.
 
+::::{tab-set}
+:sync-group: interface
+
+:::{tab-item} Shell
+:sync: shell
+
+```bash
+# add --mask rmsk.gtf to skip repeats, as velocyto run -m
+cubam velocity gex_possorted_bam.bam --gtf genes.gtf \
+    --barcodes barcodes.tsv.gz -o sample.h5ad
+```
+
+See {doc}`../cli/velocity` for the options.
+:::
+
+:::{tab-item} Python
+:sync: python
+
 ```python
 from cubam.apps.velocity import count_velocity
 
@@ -10,6 +28,9 @@ res = count_velocity("gex_possorted_bam.bam", "genes.gtf", "barcodes.tsv.gz")  #
 adata = res.to_anndata()  # layers spliced, unspliced, ambiguous (needs the anndata extra)
 res.write_h5ad("sample.h5ad")
 ```
+:::
+
+::::
 
 ## Rules
 

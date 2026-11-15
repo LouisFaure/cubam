@@ -5,9 +5,9 @@ The records of each batch are looked up in a :class:`~cubam.cells.CellIndex`
 and sorted by group, stably, so that each output keeps the order of the input
 (a coordinate-sorted input gives coordinate-sorted outputs). Their bytes are
 gathered per group and buffered on the GPU. Once enough is buffered, the full
-BGZF blocks of every group are compressed in one batched nvCOMP call
-(:func:`cubam.bgzf.bgzf_compress`) and appended to the files. Each output has
-the header of the input, with a ``@PG`` line.
+BGZF blocks of every group are compressed in one batched nvCOMP call and
+appended to the files. Each output has the header of the input, with a
+``@PG`` line.
 
 ``samtools index`` indexes the outputs.
 """
@@ -26,7 +26,7 @@ import numpy as np
 
 from cubam._kernels import copy_spans
 from cubam.bam import BamHeader, read_bam
-from cubam.bgzf import BLOCK_DATA, EOF_BLOCK, bgzf_compress
+from cubam.bgzf import BLOCK_DATA, EOF_BLOCK, _bgzf_compress
 from cubam.cells import CellIndex
 from cubam.filters import ReadFilter
 
@@ -54,7 +54,7 @@ class _Outputs:
         self.size = np.zeros(len(paths), np.int64)
         self.handles: OrderedDict = OrderedDict()  # open files, least recently used first
         head = cp.asarray(np.frombuffer(header, np.uint8))
-        first = bgzf_compress(head, level).get().tobytes()  # the header in blocks of its own
+        first = _bgzf_compress(head, level).get().tobytes()  # the header in blocks of its own
         for p in paths:
             p.write_bytes(first)
 
@@ -88,7 +88,7 @@ class _Outputs:
         boff = start[gi] + k * BLOCK_DATA
         bsize = np.minimum(BLOCK_DATA, take[groups][gi] - k * BLOCK_DATA)
         data = cp.concatenate(bufs) if len(bufs) > 1 else bufs[0]
-        out, out_off = bgzf_compress(data, self.level, boff, bsize, return_offsets=True)
+        out, out_off = _bgzf_compress(data, self.level, boff, bsize, return_offsets=True)
         out_off = np.r_[out_off.get(), out.size]
         host = out.get()
         for j, g in enumerate(groups):
@@ -148,7 +148,7 @@ def split_bam(
     read_filter
         Which records to keep; ``None`` keeps every record of a cell.
     level
-        nvCOMP Deflate level (:func:`cubam.bgzf.deflate_spans`): 2 by
+        nvCOMP Deflate level, 0 to 5: 2 by
         default, 5 for files about 9% smaller than zlib level 6, slower.
     flush_bytes
         Record bytes buffered on the GPU before compressing and writing
