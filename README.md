@@ -21,9 +21,12 @@ against the CPU tool on 6 threads:
 | One BAM per group, GEX | `samtools view -D` | sinto | 15 min | 21 s | 42× |
 | One BAM per group, ATAC | `samtools view -D` | sinto | 27 min | 54 s | 30× |
 | Counts per cell and gene | featureCounts, Cell Ranger | featureCounts, no cells | 56 s | 16 s | 3.6× |
+| Duplicates within a cell barcode\* | samtools markdup 1.22 | samtools fixmate + markdup | 8.7 min | 36 s | 14.5× |
 
-Times include reading the inputs and writing the outputs. Every
-application also runs on an 8 GB GPU, 5 to 50% slower. The CPU tools and
+\*On a 10x scATAC BAM of 207.7 million records, sorted by Parabricks fq2bam.
+
+Times include reading the inputs and writing the outputs. The other
+applications also run on an 8 GB GPU, 5 to 50% slower. The CPU tools and
 their options, memory, and how to reproduce the numbers are in the
 [benchmarks](https://cubam.readthedocs.io/en/latest/benchmarks.html).
 
@@ -51,6 +54,8 @@ cubam coverage gex_possorted_bam.bam \
 
 cubam split atac_possorted_bam.bam \
     --barcodes clusters.csv -o by_cluster/
+
+cubam markdup sorted.bam --barcode-tag CB -o marked.bam
 
 cubam count gex_possorted_bam.bam --features genes.gtf \
     --barcodes barcodes.tsv.gz -o counts/

@@ -69,6 +69,32 @@ more time, 50% for ATAC coverage and velocity. On a small GPU, velocity
 keeps its rows per molecule in host memory (12 GB here), and the
 fragments table always stays there (8.4 GB for 348 million fragments).
 
+## Duplicate marking
+
+Duplicate marking ran on another input: one 10x scATAC sample (two NovaSeq
+runs of GSE273194), aligned by Parabricks 4.8 `fq2bam --no-markdups --gpusort`
+with the cell barcode in a `CB` tag. The BAM file is 10.1 GB, with 207.7
+million records, sorted by coordinate and with `MC` tags. Both tools mark
+duplicates within a cell barcode, on the same machines as above.
+
+| Tool | Time | Speedup | GPU | Host |
+|---|---:|---:|---:|---:|
+| samtools 1.22: `collate \| fixmate -m \| sort \| markdup --barcode-tag CB`, 6 threads | 522 s | | | 14.1 GB |
+| `cubam markdup --barcode-tag CB`, A100 | 36 s | 14.5× | 13.6 GB | 2.2 GB |
+
+samtools needs `fixmate -m` on reads grouped by name, hence the `collate`
+and the second sort. Both outputs hold 76,841,695 duplicates; on the same
+record order every flag is the same ({doc}`apps/markdup`). The output of
+cubam is 7.4 GB, that of samtools 6.7 GB. The 8 GB GPU was not measured.
+
+```bash
+uv run --extra rapids-cu12 python benchmarks/compare_markdup.py \
+    sorted.bam WORKDIR --barcode-tag CB --threads 6
+```
+
+It runs both tools (samtools on the `PATH`), then compares the flags of
+every read, and writes `WORKDIR/markdup_benchmark.json`.
+
 ## Reproduce
 
 ```bash

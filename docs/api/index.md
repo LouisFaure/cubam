@@ -15,6 +15,7 @@ fragments
 alleles
 coverage
 split
+markdup
 features
 velocity
 bgzf
@@ -72,6 +73,14 @@ Coverage tracks per group of cells, from reads or fragments, as bigWig.
 :shadow: none
 
 One BAM file per group of cells or per cell.
+:::
+
+:::{grid-item-card} {fas}`clone` Duplicate marking — `cubam.apps.markdup`
+:link: markdup
+:link-type: doc
+:shadow: none
+
+Duplicate flags as samtools markdup, optionally within a cell barcode.
 :::
 
 :::{grid-item-card} {fas}`table-cells` Feature counts — `cubam.apps.features`

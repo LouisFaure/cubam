@@ -213,6 +213,22 @@ def _split(args) -> tuple[object, str]:
     return res, f"{len(res.paths)} BAM files in {args.output}; index them with samtools index"
 
 
+def _markdup(args) -> tuple[object, str]:
+    import json
+
+    from cubam.apps.markdup import mark_duplicates
+
+    res = mark_duplicates(
+        args.bam, args.output, barcode_tag=args.barcode_tag, chunk_bytes=args.chunk_bytes, level=args.level
+    )
+    if args.stats:
+        if str(args.stats).endswith(".json"):
+            args.stats.write_text(json.dumps(res.stats, indent=1) + "\n")
+        else:
+            args.stats.write_text("".join(f"{k}: {v}\n" for k, v in res.stats.items()))
+    return res, f"{args.output}; index it with samtools index"
+
+
 def _features(args):
     """The ``--features`` of ``count``: an IntervalIndex of a GTF or BED file, or a tag name."""
     from cubam.intervals import IntervalIndex
@@ -469,6 +485,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(run=_split)
 
+    # markdup
+    p = sub.add_parser(
+        "markdup",
+        help="mark duplicates as samtools fixmate -m + markdup, optionally within a barcode",
+        description="Mark the duplicate reads of a coordinate-sorted BAM file (with MC tags), with the "
+        "flags of samtools fixmate -m followed by samtools markdup (template mode). With --barcode-tag, "
+        "duplicates must share the tag, as samtools markdup --barcode-tag (10x scATAC: CB).",
+    )
+    p.add_argument("bam", type=Path, help="a coordinate-sorted BAM file with MC tags")
+    p.add_argument("-o", "--output", type=Path, required=True, help="the output BAM file")
+    p.add_argument("--barcode-tag", metavar="TAG", help="duplicates must share this tag, e.g. CB (default: none)")
+    p.add_argument("-f", "--stats", type=Path, help="write the counts here (JSON when the name ends in .json)")
+    p.add_argument(
+        "--level", type=int, default=2, choices=range(6), metavar="0-5", help="nvCOMP Deflate level (default: 2)"
+    )
+    p.add_argument("--chunk-bytes", type=_size, metavar="SIZE", help="compressed bytes per chunk (default: auto)")
+    p.set_defaults(run=_markdup)
+
     # count
     p = sub.add_parser(
         "count",
@@ -546,7 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 #: Statistics of a run worth a place in its summary line, in this order.
-_SUMMARY_STATS = ("records", "reads", "fragments", "kept", "assigned", "molecules")
+_SUMMARY_STATS = ("records", "reads", "fragments", "kept", "assigned", "molecules", "READ", "DUPLICATE TOTAL")
 
 
 def _summary(res, seconds: float) -> str:
