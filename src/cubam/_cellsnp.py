@@ -1,5 +1,5 @@
 """
-``cubam-cellsnp``: a stand-in for ``cellsnp-lite`` in mode 1a, on the GPU.
+``cubam cellsnp``: a stand-in for ``cellsnp-lite`` in mode 1a, on the GPU.
 
 It takes the arguments of cellsnp-lite. Mode 1a (one BAM with ``-s``, a
 barcode list with ``-b``, sites with ``-R``) runs on the GPU with
@@ -8,8 +8,9 @@ mode, or an option that cubam does not implement, runs the real cellsnp-lite:
 the one named by ``CUBAM_CELLSNP_FALLBACK``, or else the first
 ``cellsnp-lite`` on ``PATH`` that is not this command.
 
-Put a ``cellsnp-lite`` link to it first on ``PATH`` to speed up tools that
-call cellsnp-lite, such as the ``pileup_and_phase.R`` script of numbat.
+``cubam`` run under the name ``cellsnp-lite`` (a link to it put first on
+``PATH``) is this command, which speeds up tools that call cellsnp-lite, such
+as the ``pileup_and_phase.R`` script of numbat.
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ def _fallback(argv: list[str]) -> int:
                 exe = cand
                 break
     if not exe:
-        print("[E::cubam-cellsnp] mode not supported on the GPU, and no cellsnp-lite to fall back to", file=sys.stderr)
+        print("[E::cubam cellsnp] mode not supported on the GPU, and no cellsnp-lite to fall back to", file=sys.stderr)
         return 1
     os.execv(exe, [exe, *argv])
     return 1  # not reached
@@ -108,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     if "excl_flag" in opts:
         kw["exclude_flags"] = int(opts["excl_flag"], 0)
     t0 = time.time()
-    print(f"[I::main] cubam-cellsnp: {opts['bam']} (cellsnp-lite mode 1a on the GPU)", file=sys.stderr)
+    print(f"[I::main] cubam cellsnp: {opts['bam']} (cellsnp-lite mode 1a on the GPU)", file=sys.stderr)
     res = count_alleles(opts["bam"], opts["sites"], opts["barcodes"], **kw)
     res.write_cellsnp(opts["outdir"])
     print(

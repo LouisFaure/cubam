@@ -152,7 +152,7 @@ def test_many_chunks_same_counts(tmp_path, block, chunk):
 
 
 def test_cellsnp_cli_parse():
-    from cubam.cellsnp_cli import _parse
+    from cubam._cellsnp import _parse
 
     mode1a = ["-s", "x.bam", "-b", "bc.tsv", "-O", "out", "-R", "s.vcf", "-p", "20", "--minMAF", "0"]
     o = _parse(mode1a + ["--minCOUNT", "2", "--UMItag", "Auto", "--cellTAG", "CB"])
@@ -164,7 +164,7 @@ def test_cellsnp_cli_parse():
 
 
 def test_cellsnp_cli_runs(tmp_path):
-    from cubam.cellsnp_cli import main
+    from cubam._cellsnp import main
 
     reads = [read("r1", 1000, seq_with(10, "G")), read("r2", 1000, seq_with(10, "A"), umi="C" * 12, cell=CELLS[1])]
     bam = write_bam(tmp_path / "a.bam", REFS, reads)
