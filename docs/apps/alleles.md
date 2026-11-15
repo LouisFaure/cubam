@@ -4,12 +4,32 @@
 known sites, as cellsnp-lite does in mode 1a (a VCF of sites and a barcode
 list).
 
+::::{tab-set}
+:sync-group: interface
+
+:::{tab-item} Shell
+:sync: shell
+
+```bash
+cubam cellsnp -s gex_possorted_bam.bam -b barcodes.tsv -R snps.vcf \
+    -O pileup/sample_rna --UMItag UB --minCOUNT 2
+```
+
+See {doc}`../cli/cellsnp` for the options.
+:::
+
+:::{tab-item} Python
+:sync: python
+
 ```python
 from cubam.apps.alleles import count_alleles
 
 res = count_alleles("gex_possorted_bam.bam", "snps.vcf", "barcodes.tsv", umi_tag="UB", min_count=2)
 res.write_cellsnp("pileup/sample_rna")  # cellSNP.base.vcf, cellSNP.samples.tsv, AD/DP/OTH matrices
 ```
+:::
+
+::::
 
 ## Rules
 
@@ -23,15 +43,14 @@ The rules are those of cellsnp-lite 1.2.3 in mode 1a:
 
 ## A drop-in for cellsnp-lite
 
-The `cubam-cellsnp` command takes the arguments of cellsnp-lite. Mode 1a
-(one BAM with `-s`, a barcode list with `-b`, sites with `-R`) runs on the
-GPU and writes the same files. Any other mode, or an option that cubam does
-not implement, runs the real cellsnp-lite: the one named by
-`CUBAM_CELLSNP_FALLBACK`, or else the first `cellsnp-lite` on `PATH` that is
-not this command.
+`cubam cellsnp` takes the arguments of cellsnp-lite. Mode 1a (one BAM with
+`-s`, a barcode list with `-b`, sites with `-R`) runs on the GPU and writes
+the same files. Any other mode, or an option that cubam does not implement,
+runs the real cellsnp-lite.
 
-Put a `cellsnp-lite` link to it first on `PATH` to speed up tools that call
-cellsnp-lite, such as the `pileup_and_phase.R` script of numbat.
+Run under the name `cellsnp-lite`, `cubam` is `cubam cellsnp`: a link put
+first on `PATH` speeds up tools that call cellsnp-lite, such as the
+`pileup_and_phase.R` script of numbat. See {doc}`../cli/cellsnp`.
 
 ## Validation
 

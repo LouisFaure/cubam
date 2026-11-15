@@ -72,13 +72,15 @@ fragments table always stays there (8.4 GB for 348 million fragments).
 ## Reproduce
 
 ```bash
-uv run --extra rapids-cu12 --extra anndata python benchmarks/speed_cubam.py \
+uv run --extra rapids-cu12 --extra anndata \
+    python benchmarks/speed_cubam.py \
     --outs OUTS --gtf genes.gtf --sites snps.vcf \
     --rna-barcodes bc_rna.tsv --atac-barcodes bc_atac.tsv \
     --workdir WORKDIR --only velocity_gex [--gpu-gb 8]
 
-pixi exec -s sinto -s "setuptools<81" -s samtools -s bedtools -s ucsc-bedgraphtobigwig \
-    -s subread -s cellsnp-lite -s bc -- bash benchmarks/speed_baselines.sh \
+pixi exec -s sinto -s "setuptools<81" -s samtools -s bedtools \
+    -s ucsc-bedgraphtobigwig -s subread -s cellsnp-lite -s bc -- \
+    bash benchmarks/speed_baselines.sh \
     OUTS genes.gtf snps.vcf bc_rna.tsv bc_atac.tsv WORKDIR [STEP...]
 ```
 

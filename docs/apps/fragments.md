@@ -3,6 +3,23 @@
 {func}`cubam.apps.fragments.call_fragments` calls ATAC fragments from a
 coordinate-sorted, paired-end BAM file with the rules of Cell Ranger.
 
+::::{tab-set}
+:sync-group: interface
+
+:::{tab-item} Shell
+:sync: shell
+
+```bash
+cubam fragments atac_possorted_bam.bam -o fragments.tsv.gz \
+    --keep-chroms "$(paste -sd, primary_contigs.txt)"
+```
+
+See {doc}`../cli/fragments` for the options.
+:::
+
+:::{tab-item} Python
+:sync: python
+
 ```python
 from cubam.apps.fragments import call_fragments
 
@@ -10,6 +27,9 @@ frags = call_fragments("atac_possorted_bam.bam", keep_chroms=primary_contigs)
 frags.table  # ref, start, end, bc (packed barcode), count: a pandas DataFrame
 frags.write_tsv("fragments.tsv.gz")  # as Cell Ranger writes it, BGZF compressed on the GPU
 ```
+:::
+
+::::
 
 `keep_chroms` lists the primary contigs of the reference: the
 `# primary_contig=` lines of a Cell Ranger fragments file, or its

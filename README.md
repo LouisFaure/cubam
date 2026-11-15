@@ -1,6 +1,4 @@
-# cubam
-
-Read BAM files on the GPU, as columns.
+# cubam: GPU-accelerated BAM parsing into columns
 
 cubam reads a BAM file in chunks and returns the records of each chunk as
 columns on the GPU (CuPy arrays and cuDF columns). Applications built on the
@@ -34,30 +32,37 @@ their options, memory, and how to reproduce the numbers are in the
 cubam needs Linux, Python 3.11 or newer, and an NVIDIA GPU with CUDA 12.
 
 ```bash
-pip install "cubam[rapids-cu12] @ git+https://github.com/LouisFaure/cubam"
+pip install \
+    "cubam[rapids-cu12] @ git+https://github.com/LouisFaure/cubam"
 ```
 
 Add the `anndata` extra for AnnData and h5ad outputs.
 
 ## Example
 
-```python
-import cubam
+```bash
+cubam fragments atac_possorted_bam.bam -o fragments.tsv.gz
 
-with cubam.memory_pool():
-    for batch in cubam.read_bam("possorted_bam.bam"):
-        keep = batch.has_flags(none_of=0x904) & (batch.mapq > 30)
-        reads = batch.take(keep)
-        barcodes = reads.tag("CB").strings()  # cuDF string column
-        ends = reads.five_prime()  # 5' ends, soft clips included
+cubam cellsnp -s gex_possorted_bam.bam -b barcodes.tsv.gz \
+    -R snps.vcf.gz -O pileup/
+
+cubam coverage gex_possorted_bam.bam \
+    --barcodes clusters.csv -o tracks/
+
+cubam split atac_possorted_bam.bam \
+    --barcodes clusters.csv -o by_cluster/
+
+cubam count gex_possorted_bam.bam --features genes.gtf \
+    --barcodes barcodes.tsv.gz -o counts/
+
+cubam velocity gex_possorted_bam.bam --gtf genes.gtf \
+    --barcodes barcodes.tsv.gz -o sample.h5ad
 ```
 
-```python
-from cubam.apps.velocity import count_velocity
-
-res = count_velocity("gex_possorted_bam.bam", "genes.gtf", "barcodes.tsv.gz")
-res.write_h5ad("sample.h5ad")  # layers spliced, unspliced, ambiguous
-```
+`cubam <command> --help` lists the options of each command. The same
+applications, and the reader that gives the records of a BAM file as GPU
+columns, are also available in Python: see
+[Reading a BAM file](https://cubam.readthedocs.io/en/latest/reading.html).
 
 ## Development
 

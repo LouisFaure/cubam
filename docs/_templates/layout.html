@@ -1,0 +1,9 @@
+{%- extends "!layout.html" %}
+{#- The home page's heading already is `html_title`: title its tab with the heading alone. #}
+{%- block htmltitle %}
+  {%- if pagename == root_doc %}
+    <title>{{ title|striptags|e }}</title>
+  {%- else %}
+    {{- super() }}
+  {%- endif %}
+{%- endblock %}
