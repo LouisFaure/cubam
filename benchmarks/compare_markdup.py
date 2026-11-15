@@ -1,7 +1,7 @@
 """cubam markdup against samtools markdup on one coordinate-sorted BAM: time, memory, and the flags of every read.
 
     uv run --extra rapids-cu12 python benchmarks/compare_markdup.py sorted.bam WORKDIR \
-        [--barcode-tag CB] [--threads 6] [--skip-samtools]
+        [--barcode-tag CB] [--threads 6] [--skip-samtools] [--gpu-gb 8]
 
 The input needs MC tags (BWA-MEM, Parabricks fq2bam) and no duplicate flags. samtools
 starts from the same file, as it must: ``samtools collate | fixmate -m | sort |
@@ -12,6 +12,9 @@ and mate: both outputs hold the same records, in an order that may differ at equ
 coordinates: single reads with an unmapped mate and the same score keep the first in the
 file, so they can differ. Last, cubam decides on the file samtools marked, in its record
 order, and every flag is compared. Writes WORKDIR/markdup_benchmark.json.
+
+``--gpu-gb 8`` holds all but 8 GB of the GPU before cubam starts, as on an 8 GB GPU, and
+writes WORKDIR/markdup_benchmark_8gb.json; the peak GPU memory leaves out what it holds.
 """
 
 from __future__ import annotations
@@ -19,11 +22,21 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+# runs cubam with all but GB gigabytes of the GPU held, as on a GPU of that size
+_HOLD = (
+    "import sys, cupy as cp\n"
+    "free, total = cp.cuda.runtime.memGetInfo()\n"
+    "cp.cuda.runtime.malloc(int(total - float(sys.argv[1]) * 1e9))\n"
+    "from cubam.cli import main\n"
+    "sys.exit(main(sys.argv[2:]))\n"
+)
 
 # runs a command and prints the peak RSS (kB) of its largest process, from getrusage of the children
 _RUSAGE = (
@@ -113,19 +126,28 @@ def main() -> None:
     ap.add_argument("--barcode-tag", default="CB")
     ap.add_argument("--threads", type=int, default=6)
     ap.add_argument("--skip-samtools", action="store_true", help="reuse WORKDIR/samtools.bam")
+    ap.add_argument("--gpu-gb", type=float, help="hold the rest of the GPU, as on a GPU of this size")
     args = ap.parse_args()
     w = args.workdir
     w.mkdir(parents=True, exist_ok=True)
     t = args.threads
     bc = f"--barcode-tag {args.barcode_tag}" if args.barcode_tag else ""
-    res = {"input": str(args.bam), "threads": t}
+    res = {"input": str(args.bam), "threads": t, "gpu_gb": args.gpu_gb or "all"}
 
+    held = 0
+    cubam = f"{sys.executable} -m cubam.cli"
+    if args.gpu_gb:
+        total = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"], capture_output=True, text=True
+        ).stdout.split()[0]
+        held = int(total) - args.gpu_gb * 1e9 / 2**20  # MiB
+        cubam = f"{sys.executable} -c {shlex.quote(_HOLD)} {args.gpu_gb}"
     with GpuPeak() as gpu:
         res["cubam"] = timed(
-            f"{sys.executable} -m cubam.cli markdup {args.bam} {bc} -o {w}/cubam.bam -f {w}/cubam_stats.json",
+            f"{cubam} markdup {args.bam} {bc} -o {w}/cubam.bam -f {w}/cubam_stats.json",
             w / "cubam.log",
         )
-    res["cubam"]["gpu_peak_gb"] = round(gpu.peak / 1024, 1)
+    res["cubam"]["gpu_peak_gb"] = round((gpu.peak - held) / 1024, 1)
 
     if not args.skip_samtools:
         res["samtools"] = timed(
@@ -152,7 +174,8 @@ def main() -> None:
     theirs = dup_flags(w / "samtools.bam")
     res["same_order_records"] = int(mask.size)
     res["same_order_differences"] = int((mask != theirs).sum())
-    (w / "markdup_benchmark.json").write_text(json.dumps(res, indent=1) + "\n")
+    name = f"markdup_benchmark_{args.gpu_gb:g}gb.json" if args.gpu_gb else "markdup_benchmark.json"
+    (w / name).write_text(json.dumps(res, indent=1) + "\n")
     print(json.dumps(res, indent=1))
 
 

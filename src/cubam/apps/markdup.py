@@ -10,18 +10,24 @@ Three passes over the file:
 
 1. Pair scores. The score of a read is the sum of its base qualities of at least 15.
    The scores of the primary reads are summed per read name, which gives the score of
-   a read plus that of its mate (``calc_score + ms`` in samtools).
-2. Duplicates, one reference at a time (duplicates never cross references). Every
-   examined read (primary, mapped, not QC-failed) gets the pair key of samtools
-   (barcode, unclipped 5' coordinates of the read and of its mate from ``MC``,
-   orientation, leftmost) when it has a mapped mate, and the single key (barcode,
-   unclipped 5' coordinate, strand) in any case. In a group of reads with the same
-   pair key the read with the highest pair score stays, ties going to the smallest
-   read name; the others are duplicates. A read without a mapped mate is a duplicate
-   when a read with a mate has the same single key; among such reads only, the
-   highest score stays, ties going to the first in the file.
+   a read plus that of its mate (``calc_score + ms`` in samtools). A score waits on the
+   GPU only until its mate is read; the sums go to host memory (4 bytes per record).
+2. Duplicates. Every examined read (primary, mapped, not QC-failed) gets the pair key
+   of samtools (barcode, unclipped 5' coordinates of the read and of its mate from
+   ``MC``, orientation, leftmost) when it has a mapped mate, and the single key
+   (barcode, unclipped 5' coordinate, strand) in any case. In a group of reads with
+   the same pair key the read with the highest pair score stays, ties going to the
+   smallest read name; the others are duplicates. A read without a mapped mate is a
+   duplicate when a read with a mate has the same single key; among such reads only,
+   the highest score stays, ties going to the first in the file. A group is decided
+   once the reads still to come cannot join it: they start at least the largest
+   leading clip of the file (found in pass 1) before the last position read. So the
+   GPU holds a batch plus about a read length of reads, and the flags go to host
+   memory (1 byte per record).
 3. Writing. The duplicate flag is set in the raw records, which are compressed again
    (BGZF, nvCOMP) behind the input header with a ``@PG`` line.
+
+GPU memory does not grow with the file: it fits an 8 GB GPU.
 
 Differences from samtools: read names are compared on their first 32 bytes (ties
 between longer names that share them are counted in the statistics); barcodes and
@@ -167,10 +173,11 @@ def _launch(name: str, n: int, *args) -> None:
 
 @dataclass
 class MarkdupResult:
-    """Counts as in the ``samtools markdup -s`` report, and timings."""
+    """Counts as in the ``samtools markdup -s`` report, the run time, and the time of each pass."""
 
     stats: dict = field(default_factory=dict)
-    seconds: dict = field(default_factory=dict)
+    seconds: float = 0.0
+    steps: dict = field(default_factory=dict)
 
 
 def _fields(batch, barcode_tag: str | None):
@@ -206,37 +213,119 @@ def _fields(batch, barcode_tag: str | None):
     return out
 
 
+_NOT_PRIMARY = SECONDARY | SUPPLEMENTARY
+_NOT_EXAMINED = SECONDARY | SUPPLEMENTARY | UNMAPPED | QC_FAIL
+_PAIR_KEY = ("barcode", "tid", "pair_t", "pair_mtid", "pair_o", "pair_left", "pair_orient")
+_SINGLE_KEY = ("barcode", "tid", "single_c", "single_orient")
+
+
+def _coord_key(ref, pos):
+    """(reference, position) as one int64 in file order, unplaced records (reference -1) last."""
+    import cupy as cp
+
+    r = ref.astype(cp.int64)
+    r = cp.where(r < 0, np.int64(1 << 31), r)
+    return (r << 32) | (pos.astype(cp.int64) + 1)
+
+
+def _cat(a: dict | None, b: dict | None) -> dict | None:
+    import cupy as cp
+
+    if a is None or b is None:
+        return b if a is None else a
+    return {k: cp.concatenate([a[k], b[k]]) for k in a}
+
+
+def _sum_by_name(rows: dict, last):
+    """Per row: the sum of the scores of the rows with its name, and whether that sum is final.
+
+    It is final when the name has all its primary reads (2 for a paired read, 1
+    otherwise), or when the file is read past the position of the mate
+    (``mate < last``) without finding it. ``last=None``: every sum is final.
+    """
+    import cupy as cp
+
+    order = cp.argsort(rows["h"])
+    hs = rows["h"][order]
+    s = rows["s"][order]
+    start = cp.ones(hs.size, cp.bool_)
+    start[1:] = hs[1:] != hs[:-1]
+    gid = cp.cumsum(start) - 1
+    first = cp.flatnonzero(start)
+    end = cp.concatenate([first[1:], cp.asarray([hs.size], first.dtype)]) - 1
+    cs = cp.cumsum(s)
+    total = cp.empty_like(s)
+    total[order] = (cs[end] - cs[first] + s[first])[gid]
+    if last is None:
+        return total, cp.ones(hs.size, cp.bool_)
+    count = cp.empty(hs.size, cp.int64)
+    count[order] = (end - first + 1)[gid]
+    done = (count >= rows["need"]) | (rows["mate"] < last)
+    return total, done
+
+
 def _pair_scores(path, chunk_bytes):
-    """Sorted unique read-name hashes of primary reads and the sum of their scores (read + mate)."""
-    import cudf
+    """Pair score of every record (numpy int32, in file order), the number of records, and the
+    largest leading clip of the examined reads.
+
+    The pair score of a primary read is the sum of the scores of the primary
+    reads of its name: its own plus that of its mate. Each score waits on the
+    GPU until the mate is read (or the file is read past the mate's position),
+    so only pairs whose mate is still to come are held: mostly mates on later
+    references. Other records get 0.
+    """
     import cupy as cp
 
-    hashes, scores = [], []
-    n_records = 0
+    parts: list[np.ndarray] = []
+    late: list[tuple] = []  # (ordinals, scores) of the reads whose mate came in a later batch
+    held = None
+    max_lclip = 0
+    ordinal0 = 0
     for batch in read_bam(path, chunk_bytes):
-        n_records += len(batch)
-        prim = batch.take(batch.has_flags(none_of=SECONDARY | SUPPLEMENTARY))
-        if len(prim) == 0:
-            continue
-        f = _fields(prim, None)
-        df = cudf.DataFrame({"h": prim.name_hash(), "s": f["score"].astype(cp.int64)})
-        # reduce inside the batch first: most mates are in the same batch
-        red = df.groupby("h", sort=False).s.sum()
-        hashes.append(red.index.values)
-        scores.append(red.values)
-    df = cudf.DataFrame({"h": cp.concatenate(hashes), "s": cp.concatenate(scores)})
-    del hashes, scores
-    red = df.groupby("h", sort=True).s.sum()
-    del df
-    uh, us = red.index.values, red.values.astype(cp.int64)
-    return uh, us, n_records
+        n = len(batch)
+        out = cp.zeros(n, cp.int32)
+        idx = cp.flatnonzero(batch.has_flags(none_of=_NOT_PRIMARY))
+        cur = None
+        if idx.size:
+            prim = batch.take(idx)
+            f = _fields(prim, None)
+            ex = prim.has_flags(none_of=UNMAPPED | QC_FAIL)
+            if bool(ex.any()):
+                max_lclip = max(max_lclip, int(f["lclip"][ex].max()))
+            cur = {
+                "h": prim.name_hash(),
+                "s": f["score"].astype(cp.int64),
+                "o": idx.astype(cp.int64) + ordinal0,
+                "need": cp.where((prim.flag.astype(cp.int32) & PAIRED) != 0, 2, 1).astype(cp.int8),
+                "mate": _coord_key(prim.nref, prim.npos),
+            }
+        rows = _cat(held, cur)
+        if rows is not None:
+            total, done = _sum_by_name(rows, _coord_key(batch.ref[-1:], batch.pos[-1:]))
+            o, s = rows["o"][done], total[done].astype(cp.int32)
+            here = o >= ordinal0
+            out[o[here] - ordinal0] = s[here]
+            if not bool(here.all()):
+                late.append((o[~here].get(), s[~here].get()))
+            keep = cp.flatnonzero(~done)
+            held = {k: v[keep] for k, v in rows.items()} if keep.size else None
+        parts.append(out.get())
+        ordinal0 += n
+    if held is not None:  # mates missing from the file: the sum of what was found
+        total, _ = _sum_by_name(held, None)
+        late.append((held["o"].get(), total.astype(cp.int32).get()))
+    scores = np.concatenate(parts) if parts else np.zeros(0, np.int32)
+    for o, s in late:
+        scores[o] = s
+    return scores, ordinal0, max_lclip
 
 
-def _keys(batch, ordinal0: int, uh, us, barcode_tag):
-    """Key columns of the examined reads of a batch (a dict of cupy arrays)."""
+def _keys(batch, ordinal0: int, scores, barcode_tag):
+    """Key columns of the examined reads of a batch (a dict of cupy arrays), and the
+    (reference, position) of the last one; ``None`` when there is none."""
     import cupy as cp
 
-    ex = batch.has_flags(none_of=SECONDARY | SUPPLEMENTARY | UNMAPPED | QC_FAIL)
+    ex = batch.has_flags(none_of=_NOT_EXAMINED)
     idx = cp.flatnonzero(ex)
     sub = batch.take(idx)
     n = len(sub)
@@ -286,16 +375,11 @@ def _keys(batch, ordinal0: int, uh, us, barcode_tag):
     orient = cp.where(a, cp.where(~rev, O_RF, O_FR), orient)
     left_read = cp.where(leftmost, R_LE, R_RI).astype(cp.int8)
 
-    # pair score: read + mate (sum over the primary reads of the name)
-    h = sub.name_hash()
-    k = cp.minimum(cp.searchsorted(uh, h), uh.size - 1)
-    pair_score = cp.where(uh[k] == h, us[k], f["score"].astype(cp.int64))
-
     words = cp.empty(n * 4, cp.uint64)
     long_name = cp.empty(n, cp.int32)
     _launch("md_name_words", n, sub.data, sub.offset, np.int64(n), words, long_name)
 
-    return {
+    cols = {
         "ordinal": idx.astype(cp.int64) + ordinal0,
         "tid": tid.astype(cp.int32),
         "barcode": f["barcode"],
@@ -308,13 +392,14 @@ def _keys(batch, ordinal0: int, uh, us, barcode_tag):
         "single_c": cp.where(rev, this_end, this_coord),
         "single_orient": cp.where(rev, O_RR, O_FF).astype(cp.int8),
         "score": f["score"].astype(cp.int64),
-        "pair_score": pair_score,
+        "pair_score": scores[idx].astype(cp.int64),  # read + mate (pass 1)
         "w0": words[0::4].copy(),
         "w1": words[1::4].copy(),
         "w2": words[2::4].copy(),
         "w3": words[3::4].copy(),
         "long_name": long_name.astype(cp.bool_),
     }
+    return cols, (int(tid[-1]), int(pos[-1]))
 
 
 def _group_ids(cols: list):
@@ -341,55 +426,102 @@ def _first_by(group, order_cols: list):
     return order, first
 
 
-def _duplicates(t: dict, stats: dict):
-    """Ordinals of the duplicates among the examined reads of one reference."""
+def _pair_duplicates(t: dict, stats: dict):
+    """Ordinals of the duplicates among reads with a mapped mate whose key groups are complete.
+
+    The highest pair score stays, then the smallest name, then the first in the file.
+    """
     import cupy as cp
 
     n = t["ordinal"].size
-    dup = cp.zeros(n, cp.bool_)
-    pm = t["has_mate"]
-    # pairs: highest pair score, then smallest name (then first in the file) stays
-    pi = cp.flatnonzero(pm)
-    if pi.size:
-        g = _group_ids([t[c][pi] for c in ("barcode", "pair_t", "pair_mtid", "pair_o", "pair_left", "pair_orient")])
-        neg = -t["pair_score"][pi]
-        order, first = _first_by(g, [neg, t["w0"][pi], t["w1"][pi], t["w2"][pi], t["w3"][pi], t["ordinal"][pi]])
-        d = cp.zeros(pi.size, cp.bool_)
-        d[order[~first]] = True
-        dup[pi[d]] = True
-        # ties on the 32-byte name prefix between long names (the order of samtools may differ)
+    g = _group_ids([t[c] for c in _PAIR_KEY])
+    neg = -t["pair_score"]
+    order, first = _first_by(g, [neg, t["w0"], t["w1"], t["w2"], t["w3"], t["ordinal"]])
+    d = cp.zeros(n, cp.bool_)
+    d[order[~first]] = True
+    # ties on the 32-byte name prefix between long names (the order of samtools may differ)
+    if n > 1:
         sg = g[order]
-        same_prefix = cp.zeros(pi.size, cp.bool_)
-        if pi.size > 1:
-            eq = (sg[1:] == sg[:-1]) & (neg[order][1:] == neg[order][:-1])
-            for w in ("w0", "w1", "w2", "w3"):
-                ww = t[w][pi][order]
-                eq &= ww[1:] == ww[:-1]
-            same_prefix[1:] = eq & t["long_name"][pi][order][1:]
-        stats["NAME PREFIX TIES"] += int(same_prefix.sum())
-        stats["DUPLICATE PAIR"] += int(d.sum())
-    # singles
-    g = _group_ids([t[c] for c in ("barcode", "tid", "single_c", "single_orient")])
-    ng = int(g.max()) + 1 if n else 0
-    group_has_pair = cp.zeros(ng, cp.int32)
-    group_has_pair[g[pm]] = 1
-    si = cp.flatnonzero(~pm)
-    if si.size:
-        gs = g[si]
-        hp = group_has_pair[gs] > 0
-        d = hp.copy()
-        alone = cp.flatnonzero(~hp)
-        if alone.size:
-            order, first = _first_by(gs[alone], [-t["score"][si][alone], t["ordinal"][si][alone]])
-            da = cp.zeros(alone.size, cp.bool_)
-            da[order[~first]] = True
-            d[alone[da]] = True
-        dup[si[d]] = True
-        stats["DUPLICATE SINGLE"] += int(d.sum())
-    stats["PAIRED"] += int(pm.sum())
-    stats["SINGLE"] += int((~pm).sum())
-    return t["ordinal"][dup]
+        eq = (sg[1:] == sg[:-1]) & (neg[order][1:] == neg[order][:-1])
+        for w in ("w0", "w1", "w2", "w3"):
+            ww = t[w][order]
+            eq &= ww[1:] == ww[:-1]
+        stats["NAME PREFIX TIES"] += int((eq & t["long_name"][order][1:]).sum())
+    stats["DUPLICATE PAIR"] += int(d.sum())
+    return t["ordinal"][d]
 
+
+def _single_duplicates(t: dict, stats: dict):
+    """Ordinals of the duplicates among reads without a mapped mate whose key groups are complete.
+
+    ``t`` holds every examined read (``has_mate`` tells which have one). A
+    read without a mapped mate is a duplicate when a read with one has its
+    single key; among reads without one only, the highest score stays, then
+    the first in the file.
+    """
+    import cupy as cp
+
+    pm = t["has_mate"]
+    si = cp.flatnonzero(~pm)
+    if si.size == 0:
+        return cp.zeros(0, cp.int64)
+    g = _group_ids([t[c] for c in _SINGLE_KEY])
+    has_pair = cp.zeros(int(g.max()) + 1, cp.bool_)
+    has_pair[g[pm]] = True
+    gs = g[si]
+    d = has_pair[gs]
+    alone = cp.flatnonzero(~d)
+    if alone.size:
+        order, first = _first_by(gs[alone], [-t["score"][si][alone], t["ordinal"][si][alone]])
+        da = cp.zeros(alone.size, cp.bool_)
+        da[order[~first]] = True
+        d[alone[da]] = True
+    stats["DUPLICATE SINGLE"] += int(d.sum())
+    return t["ordinal"][si[d]]
+
+
+class _Window:
+    """Rows waiting until no read still to come can share their key.
+
+    The file is sorted by (reference, position), and a read at position ``p``
+    has an unclipped 5' coordinate of at least ``p + 1 - max_lclip``. Once the
+    reads up to (``tid``, ``p``) are in, the rows of earlier references, and
+    those whose key coordinate (column ``coord``) is below ``p + 1 - max_lclip``,
+    have their whole group: ``decide`` then marks them.
+    """
+
+    def __init__(self, decide, columns: tuple, coord: str, max_lclip: int):
+        self.decide, self.columns, self.coord, self.max_lclip = decide, columns, coord, max_lclip
+        self.rows = None
+
+    def add(self, rows: dict | None, last: tuple | None, stats: dict, dup: np.ndarray) -> None:
+        """Add ``rows``, the examined reads up to ``last`` (reference, position) being read;
+        ``last=None`` at the end of the file."""
+        import cupy as cp
+
+        if rows is not None:
+            rows = {k: rows[k] for k in self.columns}
+        rows = _cat(self.rows, rows)
+        if rows is None:
+            return
+        if last is None:
+            final = cp.ones(rows["tid"].size, cp.bool_)
+        else:
+            tid, pos = last
+            final = (rows["tid"] < tid) | (rows[self.coord] < pos + 1 - self.max_lclip)
+        idx = cp.flatnonzero(final)
+        if idx.size == final.size:
+            done, self.rows = rows, None
+        else:
+            keep = cp.flatnonzero(~final)
+            done = {k: v[idx] for k, v in rows.items()} if idx.size else None
+            self.rows = {k: v[keep] for k, v in rows.items()}
+        if done is not None:
+            dup[self.decide(done, stats).get()] = True
+
+
+_PAIR_COLUMNS = _PAIR_KEY + ("ordinal", "pair_score", "w0", "w1", "w2", "w3", "long_name")
+_SINGLE_COLUMNS = _SINGLE_KEY + ("ordinal", "has_mate", "score")
 
 _STATS = (
     "READ",
@@ -403,50 +535,40 @@ _STATS = (
 )
 
 
-def _duplicate_mask(path, barcode_tag, chunk_bytes, stats: dict, seconds: dict):
-    """Duplicate flag of every record of ``path`` (cupy uint8, in file order), in an RMM pool."""
+def _duplicate_mask(path, barcode_tag, chunk_bytes, stats: dict, seconds: dict) -> np.ndarray:
+    """Duplicate flag of every record of ``path`` (numpy bool, in file order), in an RMM pool."""
     import cupy as cp
 
     t0 = time.perf_counter()
-    uh, us, n_records = _pair_scores(path, chunk_bytes)
+    scores, n_records, max_lclip = _pair_scores(path, chunk_bytes)
     seconds["pair_scores"] = time.perf_counter() - t0
     stats["READ"] = n_records
 
     t0 = time.perf_counter()
-    dup_mask = cp.zeros(n_records, cp.uint8)
-    pending: list[dict] = []
-    cur_tid = None
+    dup = np.zeros(n_records, np.bool_)
+    pairs = _Window(_pair_duplicates, _PAIR_COLUMNS, "pair_t", max_lclip)
+    singles = _Window(_single_duplicates, _SINGLE_COLUMNS, "single_c", max_lclip)
     ordinal0 = 0
-
-    def finish(parts):
-        if not parts:
-            return
-        t = {k: cp.concatenate([p[k] for p in parts]) for k in parts[0]}
-        stats["EXAMINED"] += int(t["ordinal"].size)
-        dup_mask[_duplicates(t, stats)] = 1
-
     for batch in read_bam(path, chunk_bytes):
-        k = _keys(batch, ordinal0, uh, us, barcode_tag)
-        ordinal0 += len(batch)
+        n = len(batch)
+        k = _keys(batch, ordinal0, cp.asarray(scores[ordinal0 : ordinal0 + n]), barcode_tag)
+        ordinal0 += n
         if k is None:
             continue
-        tids = k["tid"]
-        # split the batch by reference; earlier references are complete
-        bounds = cp.flatnonzero(tids[1:] != tids[:-1]) + 1
-        starts = [0] + bounds.get().tolist()
-        ends = starts[1:] + [int(tids.size)]
-        for s, e in zip(starts, ends, strict=True):
-            tid = int(tids[s])
-            part = {c: v[s:e] for c, v in k.items()}
-            if cur_tid is not None and tid != cur_tid:
-                finish(pending)
-                pending = []
-            cur_tid = tid
-            pending.append(part)
-    finish(pending)
+        cols, last = k
+        pm = cols["has_mate"]
+        n_pair = int(pm.sum())
+        stats["EXAMINED"] += int(pm.size)
+        stats["PAIRED"] += n_pair
+        stats["SINGLE"] += int(pm.size) - n_pair
+        pi = cp.flatnonzero(pm)
+        pairs.add({c: cols[c][pi] for c in _PAIR_COLUMNS} if pi.size else None, last, stats, dup)
+        singles.add(cols, last, stats, dup)
+    pairs.add(None, None, stats, dup)
+    singles.add(None, None, stats, dup)
     seconds["duplicates"] = time.perf_counter() - t0
     stats["DUPLICATE TOTAL"] = stats["DUPLICATE PAIR"] + stats["DUPLICATE SINGLE"]
-    return dup_mask
+    return dup
 
 
 def duplicate_mask(
@@ -458,13 +580,15 @@ def duplicate_mask(
     counts. The duplicate flags already in the file are ignored, so the result
     can be compared with them (for example on a file marked by samtools).
     """
-    from cubam._memory import memory_pool
+    from cubam._memory import auto_chunk_bytes, memory_pool
 
+    t0 = time.perf_counter()
     BamHeader.read(path).require_coordinate_sorted(path)
-    stats, seconds = dict.fromkeys(_STATS, 0), {}
+    chunk_bytes = chunk_bytes or auto_chunk_bytes()
+    stats, steps = dict.fromkeys(_STATS, 0), {}
     with memory_pool():
-        mask = _duplicate_mask(path, barcode_tag, chunk_bytes, stats, seconds).get().astype(bool)
-    return mask, MarkdupResult(stats=stats, seconds=seconds)
+        mask = _duplicate_mask(path, barcode_tag, chunk_bytes, stats, steps)
+    return mask, MarkdupResult(stats, time.perf_counter() - t0, steps)
 
 
 def mark_duplicates(
@@ -479,18 +603,26 @@ def mark_duplicates(
 
     ``barcode_tag``: duplicates must share this tag (``CB`` for 10x data), as
     ``samtools markdup --barcode-tag``. ``level``: compression level of nvCOMP Deflate.
+    ``chunk_bytes``: compressed bytes read at a time (default: :func:`cubam.auto_chunk_bytes`).
     The duplicate flags already in the input are kept.
     """
-    from cubam._memory import memory_pool
+    import cupy as cp
 
+    from cubam._memory import auto_chunk_bytes, memory_pool
+
+    t0 = time.perf_counter()
+    output = Path(output)
+    if output.exists() and output.samefile(path):
+        raise ValueError(f"Output path refers to the input BAM: {output}")
     header = BamHeader.read(path)
     header.require_coordinate_sorted(path)
-    stats, seconds = dict.fromkeys(_STATS, 0), {}
+    chunk_bytes = chunk_bytes or auto_chunk_bytes()
+    stats, steps = dict.fromkeys(_STATS, 0), {}
     with memory_pool():
-        dup_mask = _duplicate_mask(path, barcode_tag, chunk_bytes, stats, seconds)
+        dup = _duplicate_mask(path, barcode_tag, chunk_bytes, stats, steps)
 
-        t0 = time.perf_counter()
-        cl = command_line or " ".join(shlex.quote(a) for a in sys.argv)
+        t1 = time.perf_counter()
+        cl = command_line or shlex.join([Path(sys.argv[0]).name or "python", *sys.argv[1:]])
         bc = f" on {barcode_tag}" if barcode_tag else ""
         text = header.text
         if text and not text.endswith("\n"):
@@ -501,9 +633,10 @@ def mark_duplicates(
             out.write(header.to_bytes(text))
             for batch in read_bam(path, chunk_bytes):
                 n = len(batch)
-                _launch("md_set_dup", n, batch.data, batch.offset, np.int64(n), dup_mask[ordinal0 : ordinal0 + n])
+                d = cp.asarray(dup[ordinal0 : ordinal0 + n].view(np.uint8))
+                _launch("md_set_dup", n, batch.data, batch.offset, np.int64(n), d)
                 ordinal0 += n
                 end = int(batch.offset[-1] + batch.record_sizes()[-1])
                 out.write(batch.data[int(batch.offset[0]) : end])
-        seconds["write"] = time.perf_counter() - t0
-    return MarkdupResult(stats=stats, seconds=seconds)
+        steps["write"] = time.perf_counter() - t1
+    return MarkdupResult(stats, time.perf_counter() - t0, steps)

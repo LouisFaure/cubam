@@ -80,20 +80,25 @@ duplicates within a cell barcode, on the same machines as above.
 | Tool | Time | Speedup | GPU | Host |
 |---|---:|---:|---:|---:|
 | samtools 1.22: `collate \| fixmate -m \| sort \| markdup --barcode-tag CB`, 6 threads | 522 s | | | 14.1 GB |
-| `cubam markdup --barcode-tag CB`, A100 | 36 s | 14.5× | 13.6 GB | 2.2 GB |
+| `cubam markdup --barcode-tag CB`, A100 | 35 s | 14.8× | 8.7 GB | 3.0 GB |
+| `cubam markdup --barcode-tag CB`, 8 GB | 43 s | 12.1× | 4.1 GB | 2.4 GB |
 
 samtools needs `fixmate -m` on reads grouped by name, hence the `collate`
 and the second sort. Both outputs hold 76,841,695 duplicates; on the same
 record order every flag is the same ({doc}`apps/markdup`). The output of
-cubam is 7.4 GB, that of samtools 6.7 GB. The 8 GB GPU was not measured.
+cubam is 7.4 GB, that of samtools 6.7 GB. GPU memory does not grow with the
+file; host memory holds 5 bytes per record (the pair scores and the flags).
 
 ```bash
 uv run --extra rapids-cu12 python benchmarks/compare_markdup.py \
-    sorted.bam WORKDIR --barcode-tag CB --threads 6
+    sorted.bam WORKDIR --barcode-tag CB --threads 6 [--gpu-gb 8]
 ```
 
 It runs both tools (samtools on the `PATH`), then compares the flags of
-every read, and writes `WORKDIR/markdup_benchmark.json`.
+every read, and writes `WORKDIR/markdup_benchmark.json`. `--gpu-gb 8`
+holds all but 8 GB of the GPU for cubam and writes
+`markdup_benchmark_8gb.json`; `--skip-samtools` reuses the output of
+samtools.
 
 ## Reproduce
 

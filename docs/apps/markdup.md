@@ -55,10 +55,14 @@ examined when it is primary, mapped and not QC-failed.
 
 The file is read three times. The first pass sums the scores of the primary
 reads per read name, which gives the score of a read plus its mate (the `ms`
-tag of samtools). The second pass groups the reads by key, one reference at
-a time, since duplicates never cross references. The third sets the
-duplicate flag in the records and compresses them again (nvCOMP Deflate),
-behind the header of the input with a `@PG` line. The duplicate flags
+tag of samtools). A score waits on the GPU only until its mate is read. The
+second pass groups the reads by key. A group is decided once no read still
+to come can join it: the reads still to come start at least the largest
+leading clip of the file (found in the first pass) before the last position
+read. The third pass sets the duplicate flag in the records and compresses
+them again (nvCOMP Deflate), behind the header of the input with a `@PG`
+line. GPU memory does not grow with the file, so it runs on an 8 GB GPU;
+host memory holds 5 bytes per record (the pair scores and the flags). The duplicate flags
 already in the input are kept, as samtools keeps them.
 
 `level=2` (the default) writes a file about 11% larger than that of samtools

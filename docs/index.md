@@ -42,8 +42,7 @@ available in Python: see [Reading a BAM file](reading.md).
 | [Velocity](apps/velocity.md) | `cubam velocity` | Spliced, unspliced and ambiguous molecules | velocyto 0.17 |
 
 [Benchmarks](benchmarks.md) gives the speed and the memory of each, against
-the CPU tools. Every application but duplicate marking was also run on an
-8 GB GPU.
+the CPU tools. Every application runs on an 8 GB GPU.
 
 ```{toctree}
 :hidden:

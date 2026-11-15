@@ -90,6 +90,31 @@ def test_single_loses_to_a_pair(tmp_path):
     assert res.stats["DUPLICATE SINGLE"] == 1
 
 
+def test_output_is_not_the_input(tmp_path):
+    from cubam.apps.markdup import mark_duplicates
+
+    src = write_bam(tmp_path / "in.bam", REFS, sorted(pair("a", 0, 1000, "50M", 1200, "50M"), key=sort_key))
+    size = src.stat().st_size
+    with pytest.raises(ValueError, match="refers to the input"):
+        mark_duplicates(src, src)
+    assert src.stat().st_size == size
+
+
+def test_long_clip_reaches_back_across_batches(tmp_path):
+    from cubam.apps.markdup import mark_duplicates
+
+    # "b" starts 100 bases after "a" but has the same unclipped 5' end; the reads
+    # between them fill several batches
+    reads = pair("a", 0, 1000, "50M", 1300, "50M", qual=20) + pair("b", 0, 1100, "100S50M", 1300, "50M", qual=30)
+    for i in range(400):
+        reads += pair(f"f{i:03d}", 0, 1001 + i // 4, "50M", 2000 + i * 60, "50M")
+    src = write_bam(tmp_path / "in.bam", REFS, sorted(reads, key=sort_key), block=2000)
+    res = mark_duplicates(src, tmp_path / "out.bam", barcode_tag=None, chunk_bytes=4000)
+    dups = {n for n, f in flags_of(tmp_path / "out.bam") if f & DUP}
+    assert "a" in dups and "b" not in dups
+    assert res.stats["DUPLICATE PAIR"] == 2  # both reads of "a"
+
+
 def _random_reads(seed=7, n=3000):
     rng = random.Random(seed)
     cells = ["AAAACCCCGGGGTTTT-1", "CCCCGGGGTTTTAAAA-1", None]
@@ -169,6 +194,7 @@ def test_same_flags_as_samtools(tmp_path, barcode_tag):
     ours, theirs = flags_of(tmp_path / "cubam.bam"), flags_of(tmp_path / "samtools.bam")
     assert ours == theirs
     assert res.stats["DUPLICATE TOTAL"] == sum(1 for _, f in theirs if f & DUP) > 100
-    # on the file marked by samtools: the flags samtools set, ignoring them
-    mask, res = duplicate_mask(tmp_path / "samtools.bam", barcode_tag=barcode_tag)
-    assert mask.tolist() == [bool(f & DUP) for _, f in theirs]
+    # on the file marked by samtools: the flags samtools set, ignoring them, in batches of any size
+    for chunk in (None, 3000, 20_000):
+        mask, res = duplicate_mask(tmp_path / "samtools.bam", barcode_tag=barcode_tag, chunk_bytes=chunk)
+        assert mask.tolist() == [bool(f & DUP) for _, f in theirs]
