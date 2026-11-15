@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from cubam._contigs import keep_mask
 from cubam.bam import (
     DUPLICATE,
     QC_FAIL,
@@ -43,7 +44,6 @@ from cubam.bam import (
     read_bam,
 )
 from cubam.cells import CellIndex
-from cubam.contigs import keep_mask
 from cubam.filters import ReadFilter
 from cubam.intervals import IntervalIndex
 

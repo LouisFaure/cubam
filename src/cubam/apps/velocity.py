@@ -20,7 +20,7 @@ This follows ``velocyto run`` with its default logic (``Permissive10X``):
 * **Molecules.** A molecule is a (cell, UMI): it keeps the transcripts that
   all its reads (those with transcripts) share. When they belong to one
   gene, the molecule is spliced, unspliced or ambiguous by the rules of
-  ``Permissive10X.count`` (see :func:`_classify`); otherwise it is dropped.
+  ``Permissive10X.count`` (see ``_classify``); otherwise it is dropped.
 
 With ``quirks=True`` (the default) three behaviours of velocyto 0.17 are
 kept, so that counts match it:
@@ -63,7 +63,7 @@ _BUCKET_FACTOR = 16
 _MT_AGG = {"r": "sum", "e": "max", "i": "max", "v": "max", "s": "max"}
 
 
-def segments(batch: RecordBatch, quirks: bool = True):
+def _segments(batch: RecordBatch, quirks: bool = True):
     """Segments of each read as velocyto parses CIGARs: ``(rec, start, end, spliced)``.
 
     ``start`` and ``end`` are 1-based and inclusive; ``spliced`` (per read)
@@ -461,7 +461,7 @@ def _read_segments(sub: RecordBatch, quirks: bool):
     """Segments of the reads of a batch, without reads that span more than 3 Mb (velocyto drops them)."""
     import cupy as cp
 
-    rec, s, e, spliced = segments(sub, quirks)
+    rec, s, e, spliced = _segments(sub, quirks)
     lo = cp.searchsorted(rec, rec, side="left")
     hi = cp.searchsorted(rec, rec, side="right") - 1
     k = cp.flatnonzero(e[hi] - s[lo] + 1 <= MAX_SPAN)

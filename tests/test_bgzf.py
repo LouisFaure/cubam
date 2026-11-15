@@ -8,7 +8,7 @@ import pytest
 from bamwriter import EOF_BLOCK, bgzf
 
 from cubam import inflate_chunks
-from cubam.bgzf import BgzfWriter, adler32_spans, bgzf_compress, crc32_spans, deflate_spans
+from cubam.bgzf import BgzfWriter, _adler32_spans, _bgzf_compress, _crc32_spans, _deflate_spans
 
 
 def _data(n: int, seed: int = 0) -> bytes:
@@ -85,19 +85,19 @@ def test_deflate_crc_adler_match_zlib(level):
     raw = text + rng.integers(0, 256, 150_000, dtype=np.uint8).tobytes() + b"z"
     d = cp.asarray(np.frombuffer(raw, np.uint8))
     off, size = _spans(len(raw), 30_001)
-    out, oo, osz = deflate_spans(d, off, size, level, max_chunks=4)  # several nvCOMP calls
+    out, oo, osz = _deflate_spans(d, off, size, level, max_chunks=4)  # several nvCOMP calls
     o, oo, osz = out.get(), oo.get(), osz.get()
     for a, b, s, n in zip(oo, osz, off, size, strict=True):
         assert zlib.decompress(o[a : a + b].tobytes(), -15) == raw[s : s + n]
     spans = list(zip(off, size, strict=True))
-    assert crc32_spans(d, off, size).get().tolist() == [zlib.crc32(raw[s : s + n]) for s, n in spans]
-    assert adler32_spans(d, off, size).get().tolist() == [zlib.adler32(raw[s : s + n]) for s, n in spans]
+    assert _crc32_spans(d, off, size).get().tolist() == [zlib.crc32(raw[s : s + n]) for s, n in spans]
+    assert _adler32_spans(d, off, size).get().tolist() == [zlib.adler32(raw[s : s + n]) for s, n in spans]
 
 
 def test_bgzf_compress_and_writer(tmp_path):
     rng = np.random.default_rng(1)
     raw = (b"ACGT" * 50_000) + rng.integers(0, 256, 200_000, dtype=np.uint8).tobytes()  # random: stored blocks
-    blocks = bgzf_compress(cp.asarray(np.frombuffer(raw, np.uint8))).get().tobytes()
+    blocks = _bgzf_compress(cp.asarray(np.frombuffer(raw, np.uint8))).get().tobytes()
     assert gzip.decompress(blocks + EOF_BLOCK) == raw
     p = tmp_path / "w.gz"
     with BgzfWriter(p, flush_bytes=100_000) as w:

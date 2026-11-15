@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from cubam._contigs import ref_ids
 from cubam.bam import (
     DUPLICATE,
     QC_FAIL,
@@ -41,14 +42,13 @@ from cubam.bam import (
     read_bam,
 )
 from cubam.cells import CellIndex
-from cubam.contigs import ref_ids
 from cubam.filters import ReadFilter
 from cubam.intervals import IntervalIndex
 
 _BASE = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
 
 
-def read_sites(path: str | Path) -> pd.DataFrame:
+def _read_sites(path: str | Path) -> pd.DataFrame:
     """Sites of a VCF file (plain, gzip or BGZF): ``chrom``, ``pos`` (1-based), ``ref``, ``alt``."""
     import cudf
 
@@ -209,7 +209,7 @@ def count_alleles(
     t0 = time.perf_counter()
     header = BamHeader.read(bam)
     header.require_coordinate_sorted(bam)
-    s = read_sites(sites) if not isinstance(sites, pd.DataFrame) else sites.reset_index(drop=True)
+    s = _read_sites(sites) if not isinstance(sites, pd.DataFrame) else sites.reset_index(drop=True)
     # cellsnp-lite skips records with more than two alleles, or a REF or ALT longer than one base
     ref_s, alt_s = s["ref"].fillna("").astype(str), s["alt"].fillna(".").astype(str)
     single = (ref_s.str.len() <= 1) & ~alt_s.str.contains(",", regex=False) & ((alt_s.str.len() <= 1) | (alt_s == "."))

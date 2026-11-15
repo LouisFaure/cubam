@@ -46,8 +46,8 @@ samtools (zlib level 6), level 5 files about 9% smaller.
 ## Limits
 
 - **CRC32.** nvCOMP does not check the CRC32 in the BGZF trailer, and the
-  reader does not either ({func}`cubam.bgzf.crc32_spans` computes it, at
-  about 100 GB/s). A corrupt block that still inflates to the right size
+  reader does not either (computing it on the GPU, as the writer does, runs
+  at about 100 GB/s). A corrupt block that still inflates to the right size
   goes undetected. Sizes and Deflate errors are checked.
 - **Region queries.** The whole file is read: there is no query through
   the BAI index yet.

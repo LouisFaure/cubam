@@ -7,9 +7,9 @@ import pytest
 from bamwriter import Read, sort_key, write_bam
 
 from cubam import read_bam
+from cubam._contigs import keep_mask, ref_ids
 from cubam.bam import DUPLICATE, PAIRED, PROPER_PAIR, SECONDARY
-from cubam.cells import CellIndex, pack_acgt, packed_barcodes, read_barcodes
-from cubam.contigs import keep_mask, ref_ids
+from cubam.cells import CellIndex, _pack_acgt, _packed_barcodes, _read_barcodes
 from cubam.filters import ReadFilter
 
 REFS = [("chr1", 100_000), ("chr2", 100_000), ("chrM", 16_569)]
@@ -87,19 +87,19 @@ def test_cell_index_lookup_and_groups(tmp_path):
     (tmp_path / "b.tsv").write_text("AAAC-1\nCCCG-1\n\n")
     with gzip.open(tmp_path / "b.tsv.gz", "wt") as fh:
         fh.write("AAAC-1\nCCCG-1\n")
-    assert read_barcodes(tmp_path / "b.tsv") == read_barcodes(tmp_path / "b.tsv.gz") == ["AAAC-1", "CCCG-1"]
+    assert _read_barcodes(tmp_path / "b.tsv") == _read_barcodes(tmp_path / "b.tsv.gz") == ["AAAC-1", "CCCG-1"]
     assert len(CellIndex.from_file(tmp_path / "b.tsv.gz")) == 2
 
 
 def test_packed_barcodes(tmp_path):
     b = one_batch(tmp_path, [read("r0", 100, cb="ACGT-1"), read("r1", 200)])
-    code, ok = packed_barcodes(b.tag("CB"))
+    code, ok = _packed_barcodes(b.tag("CB"))
     assert ok.get().tolist() == [True, False]
     assert np.asarray(code.get())[1] == 0
     b = one_batch(tmp_path, [read("r0", 100, cb="sample_ACGT")])
     with pytest.raises(ValueError, match="CB values"):
-        packed_barcodes(b.tag("CB"))
+        _packed_barcodes(b.tag("CB"))
     # the same codes made on the host, looked up in a CellIndex
     cells = CellIndex(["AAAC-1", "ACGT-1", "sample_ACGT"])
-    codes = cp.asarray(pack_acgt(["ACGT-1", "ACGTACGTACGTACGT-1", "AAAC-1", ""]))
+    codes = cp.asarray(_pack_acgt(["ACGT-1", "ACGTACGTACGTACGT-1", "AAAC-1", ""]))
     assert cells.lookup_packed(codes).get().tolist() == [1, -1, 0, -1]

@@ -13,7 +13,7 @@ import pytest
 from bamwriter import Read, parse_cigar, sort_key, write_bam
 
 from cubam.apps import velocity as velocity_mod
-from cubam.apps.velocity import RepeatMask, count_velocity, segments
+from cubam.apps.velocity import RepeatMask, _segments, count_velocity
 from cubam.bam import REVERSE, read_bam
 
 EXPECTED = Path(__file__).parent / "data" / "velocyto_expected.json"
@@ -212,7 +212,7 @@ def test_segments_match_velocyto_parser(data):
     d, reads = data
     got = {}
     for batch in read_bam(d / "reads.bam", 4000):
-        rec, s, e, spliced = segments(batch)
+        rec, s, e, spliced = _segments(batch)
         names = batch.names().to_arrow().to_pylist()
         rec, s, e, spliced = rec.get(), s.get(), e.get(), spliced.get()
         for i, nm in enumerate(names):

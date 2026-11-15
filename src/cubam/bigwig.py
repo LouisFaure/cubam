@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from cubam._kernels import copy_spans, launch
-from cubam.bgzf import adler32_spans, deflate_spans
+from cubam.bgzf import _adler32_spans, _deflate_spans
 
 _BW_MAGIC = 0x888FFC26
 _BPT_MAGIC = 0x78CA8C91
@@ -51,8 +51,8 @@ def _zlib(buf, off, size, level: int):
     """zlib streams (header, Deflate, Adler-32) of the spans of ``buf``: (bytes on the host, offsets, sizes)."""
     import cupy as cp
 
-    raw, raw_off, raw_size = deflate_spans(buf, off, size, level)
-    adler = adler32_spans(buf, off, size)
+    raw, raw_off, raw_size = _deflate_spans(buf, off, size, level)
+    adler = _adler32_spans(buf, off, size)
     zsize = raw_size + 6
     zoff = cp.cumsum(zsize) - zsize
     out = cp.empty(int(zoff[-1] + zsize[-1]), cp.uint8)
@@ -178,7 +178,7 @@ def write_bigwig(
 
     The runs (cupy or numpy arrays) must be sorted by contig and start, and
     must not overlap. All contigs of ``names`` are listed in the file.
-    ``level`` is the nvCOMP Deflate level (:func:`cubam.bgzf.deflate_spans`).
+    ``level`` is the nvCOMP Deflate level, 0 (entropy coding only) to 5.
     """
     import cupy as cp
 

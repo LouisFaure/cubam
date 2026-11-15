@@ -30,7 +30,7 @@ from cubam.apps.features import count_features
 from cubam.apps.fragments import call_fragments
 from cubam.apps.split import split_bam
 from cubam.apps.velocity import count_velocity
-from cubam.cells import CellIndex, read_barcodes
+from cubam.cells import CellIndex, _read_barcodes
 from cubam.intervals import IntervalIndex
 
 
@@ -73,7 +73,7 @@ def main():
     gex, atac = a.outs / "gex_possorted_bam.bam", a.outs / "atac_possorted_bam.bam"
     w = a.workdir
     w.mkdir(parents=True, exist_ok=True)
-    rna_bc, atac_bc = read_barcodes(a.rna_barcodes), read_barcodes(a.atac_barcodes)
+    rna_bc, atac_bc = _read_barcodes(a.rna_barcodes), _read_barcodes(a.atac_barcodes)
     rna_cells = CellIndex(rna_bc, labels=[f"cl{i % 8}" for i in range(len(rna_bc))])
     atac_cells = CellIndex(atac_bc, labels=[f"cl{i % 8}" for i in range(len(atac_bc))])
     prim = primary_contigs(a.outs / "atac_fragments.tsv.gz")

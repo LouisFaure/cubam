@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cubam.contigs import ref_ids
+from cubam._contigs import ref_ids
 
 
 def _read_text(path: Path) -> io.BytesIO | str:
