@@ -71,5 +71,6 @@ uv sync --extra rapids-cu12 --extra anndata
 uv run --extra rapids-cu12 --extra anndata pytest
 ```
 
-The tests need a GPU. See the
+The tests need a GPU. Without one, `uvx modal run ci/modal_gpu.py` runs them
+on a Modal GPU, with 4 pytest workers. See the
 [development page](https://cubam.readthedocs.io/en/latest/development.html).

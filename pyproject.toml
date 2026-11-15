@@ -34,7 +34,11 @@ optional-dependencies.anndata = [ "anndata>=0.10" ]
 
 [dependency-groups]
 dev = [ "ruff>=0.17" ]
-test = [ "pybigwig>=0.3.22", "pytest>=9" ]
+test = [
+ "pybigwig>=0.3.22",
+ "pytest>=9",
+ "pytest-xdist>=3.8",
+]
 docs = [
   "myst-parser>=4",
   "scverse-doc[theme]>=0.5.1 ; python_full_version >= '3.12'",
