@@ -1,8 +1,26 @@
-"""GPU memory pool."""
+"""GPU memory: the pool, and how much to read at a time."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+
+#: Peak GPU memory of the apps is about 25 times the compressed chunk size, plus what they keep
+_CHUNK_SHARE = 64
+
+
+def auto_chunk_bytes() -> int:
+    """Compressed bytes to read per chunk: 256 MB, halved while 64 chunks do not fit in the free GPU memory.
+
+    About 64 MB on an 8 GB GPU, 128 MB on a 12 or 16 GB GPU and 256 MB from
+    24 GB on (never below 32 MB). Smaller chunks cost about 10% more time.
+    """
+    import cupy as cp
+
+    free, _ = cp.cuda.runtime.memGetInfo()
+    size = 256 << 20
+    while size > 32 << 20 and size * _CHUNK_SHARE > free:
+        size //= 2
+    return size
 
 
 @contextmanager

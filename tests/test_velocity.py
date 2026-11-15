@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from bamwriter import Read, parse_cigar, sort_key, write_bam
 
+from cubam.apps import velocity as velocity_mod
 from cubam.apps.velocity import RepeatMask, count_velocity, segments
 from cubam.bam import REVERSE, read_bam
 
@@ -232,8 +233,10 @@ def counts(res):
 
 
 @pytest.mark.parametrize("mask", [False, True])
-def test_counts_match_velocyto(data, mask):
+def test_counts_match_velocyto(data, monkeypatch, mask):
     d, _ = data
+    if mask:  # molecules reduced a few cells at a time
+        monkeypatch.setattr(velocity_mod, "_BUCKET_FACTOR", 1 << 40)
     m = d / "repeats.gtf" if mask else None
     res = count_velocity(d / "reads.bam", d / "genes.gtf", d / "barcodes.tsv", mask=m, chunk_bytes=5000)
     assert counts(res) == json.loads(EXPECTED.read_text())["mask" if mask else "plain"]
@@ -259,8 +262,7 @@ def test_repeat_mask_empty_after_quirks(data, tmp_path, n_repeats):
     path = tmp_path / "single_strand.gtf"
     path.write_text(
         "".join(
-            f'chr1\trmsk\texon\t{10 + i * 200}\t{100 + i * 200}\t.\t+\t.\tgene_id "R{i}";\n'
-            for i in range(n_repeats)
+            f'chr1\trmsk\texon\t{10 + i * 200}\t{100 + i * 200}\t.\t+\t.\tgene_id "R{i}";\n' for i in range(n_repeats)
         )
     )
     mask = RepeatMask(path)

@@ -410,11 +410,12 @@ def _record_chain(data, n_ref: int):
     return cand, int(nxt[-1])
 
 
-def read_bam(path: str | Path, chunk_bytes: int = 256 << 20, **reader_kw) -> Iterator[RecordBatch]:
+def read_bam(path: str | Path, chunk_bytes: int | None = None, **reader_kw) -> Iterator[RecordBatch]:
     """Records of a BAM file on the GPU, one :class:`RecordBatch` per chunk.
 
     ``chunk_bytes`` is the size of the compressed chunks (each inflates to
-    about 4 to 7 times as many bytes of records). Run it inside
+    about 4 to 7 times as many bytes of records). The default,
+    :func:`cubam.auto_chunk_bytes`, depends on the free GPU memory. Run it inside
     :func:`cubam.memory_pool` unless an RMM pool is already set.
     """
     import cupy as cp

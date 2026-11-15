@@ -6,3 +6,4 @@ dist/
 .ruff_cache/
 cufile.log
 uv.lock
+docs/_build/

@@ -1,7 +1,7 @@
 import random
 
-import cudf
 import numpy as np
+import pandas as pd
 import pytest
 from bamwriter import Read, parse_cigar, sort_key, write_bam
 
@@ -48,7 +48,7 @@ def runs_of(cov):
 
 
 def got_runs(c, group):
-    t = c.runs.to_pandas()
+    t = c.runs
     t = t[t["group"] == c.groups.index(group)]
     return {(int(r.ref), int(r.start), int(r.end)): int(r.value) for r in t.itertuples()}
 
@@ -110,7 +110,7 @@ def test_read_coverage_matches_per_base(tmp_path, block, chunk):
 def fragments_table(rows):
     """A Fragments object from (ref, start, end, barcode) rows, sorted by position."""
     rows = sorted(rows)
-    t = cudf.DataFrame(
+    t = pd.DataFrame(
         {
             "ref": np.array([r[0] for r in rows], np.int32),
             "start": np.array([r[1] for r in rows], np.int32),

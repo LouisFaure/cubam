@@ -168,7 +168,7 @@ def count_features(
     where: Callable[[RecordBatch], object] | None = None,
     keep_chroms: list[str] | None = None,
     drop_chroms: tuple[str, ...] = (),
-    chunk_bytes: int = 256 << 20,
+    chunk_bytes: int | None = None,
 ) -> FeatureCounts:
     """Count reads or UMIs per cell and feature.
 

@@ -22,14 +22,21 @@ Mates are joined on the hash of the read name (the BAM files of Cell Ranger
 have no ``MQ`` tag, so the left mate alone cannot tell whether the right one
 passes the MAPQ filter). Duplicates are summed by a streaming group-by. Rows
 that start more than ``max_mate_distance`` plus 64 kb behind the last
-position read are final, so the output comes sorted by position.
+position read are final, so the output comes sorted by position. Final rows
+move to host memory as they come, so GPU memory does not grow with the
+number of fragments.
 """
 
 from __future__ import annotations
 
+import io
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
 
 from cubam.bam import (
     DUPLICATE,
@@ -51,15 +58,21 @@ from cubam.filters import ReadFilter
 
 _READ_COLS = ("ref", "pos", "flag", "nref", "npos", "hash", "bc", "five")
 _KEY = ["ref", "start", "end", "bc"]
+_DTYPES = {"ref": np.int32, "start": np.int32, "end": np.int32, "bc": np.uint64, "count": np.int32}
 
 
 @dataclass
 class Fragments:
     """Fragments called from a BAM file.
 
-    ``table`` is a cuDF DataFrame of ``ref`` (index into ``header.names``),
-    ``start``, ``end``, ``bc`` (packed barcode, see :func:`cubam.bam.unpack_acgt`)
-    and ``count``, sorted by position.
+    ``table`` is a pandas DataFrame, in host memory, of ``ref`` (index into
+    ``header.names``), ``start``, ``end``, ``bc`` (packed barcode, see
+    :func:`cubam.bam.unpack_acgt`) and ``count``, sorted by position.
+
+    Other tools take them without strings: :meth:`iter_gpu` gives slices on
+    the GPU, :meth:`barcode_stats` the fragments per barcode, and
+    :meth:`to_arrow` an Arrow table with dictionary-encoded chromosomes and
+    barcodes.
     """
 
     table: object
@@ -70,11 +83,75 @@ class Fragments:
     def __len__(self) -> int:
         return len(self.table)
 
-    def to_frame(self):
-        """A cuDF DataFrame with ``chrom`` and ``barcode`` as strings (Cell Ranger columns)."""
+    def iter_gpu(self, rows: int = 8_000_000) -> Iterator:
+        """Slices of ``rows`` rows of :attr:`table` as cuDF DataFrames (integer columns), in order."""
         import cudf
 
+        for lo in range(0, len(self.table), rows):
+            yield cudf.from_pandas(self.table.iloc[lo : lo + rows])
+
+    def barcode_stats(self) -> pd.DataFrame:
+        """Per barcode: ``barcode`` (name), ``bc`` (packed), ``n_unique`` (fragments) and ``n_total`` (read pairs).
+
+        Sorted by decreasing ``n_unique``, then name.
+        """
+        import cudf
+
+        parts = [
+            t.groupby("bc").agg(n_unique=("count", "size"), n_total=("count", "sum")).reset_index()
+            for t in self.iter_gpu()
+        ]
+        if not parts:
+            return pd.DataFrame(
+                {
+                    "barcode": pd.Series([], dtype=object),
+                    "bc": np.empty(0, np.uint64),
+                    "n_unique": np.empty(0, np.int64),
+                    "n_total": np.empty(0, np.int64),
+                }
+            )
+        g = cudf.concat(parts).groupby("bc").agg({"n_unique": "sum", "n_total": "sum"}).reset_index()
+        g["barcode"] = unpack_acgt(g["bc"].values)
+        g = g.sort_values(["n_unique", "barcode"], ascending=[False, True])
+        out = g[["barcode", "bc", "n_unique", "n_total"]].to_pandas().reset_index(drop=True)
+        return out.astype({"n_unique": np.int64, "n_total": np.int64})
+
+    def to_arrow(self):
+        """A pyarrow Table of ``chrom``, ``start``, ``end``, ``barcode``, ``count``.
+
+        ``chrom`` and ``barcode`` are dictionary-encoded (integer codes and
+        the names once), so no string is built per fragment. Barcode codes
+        follow :meth:`barcode_stats`. Pandas, polars and DuckDB read it as is.
+        """
+        import cupy as cp
+        import pyarrow as pa
+
+        stats = self.barcode_stats()
+        order = np.argsort(stats["bc"].to_numpy())
+        sorted_bc = cp.asarray(stats["bc"].to_numpy()[order])
+        rank = cp.asarray(order.astype(np.int32))
+        ids = [rank[cp.searchsorted(sorted_bc, t["bc"].values)].get() for t in self.iter_gpu()]
+        ids = np.concatenate(ids) if ids else np.empty(0, np.int32)
         t = self.table
+        return pa.table(
+            {
+                "chrom": pa.DictionaryArray.from_arrays(t["ref"].to_numpy(), pa.array(self.header.names)),
+                "start": t["start"].to_numpy(),
+                "end": t["end"].to_numpy(),
+                "barcode": pa.DictionaryArray.from_arrays(ids, pa.array(stats["barcode"].to_numpy(dtype=object))),
+                "count": t["count"].to_numpy(),
+            }
+        )
+
+    def to_frame(self, lo: int = 0, hi: int | None = None):
+        """Rows ``lo:hi`` as a cuDF DataFrame with ``chrom`` and ``barcode`` as strings (Cell Ranger columns).
+
+        All rows of a whole sample can take tens of GB of GPU memory as
+        strings: :meth:`write_tsv` writes them a slice at a time.
+        """
+        import cudf
+
+        t = cudf.from_pandas(self.table.iloc[lo:hi])
         codes, uniq = t["bc"].factorize()
         names = unpack_acgt(uniq.values)
         chroms = cudf.Series(self.header.names)
@@ -87,6 +164,21 @@ class Fragments:
                 "count": t["count"].reset_index(drop=True),
             }
         )
+
+    def write_tsv(self, path: str | Path, rows_per_slice: int = 10_000_000) -> None:
+        """Write the fragments as Cell Ranger does (chrom, start, end, barcode, count), BGZF when ``path`` ends in .gz.
+
+        The file has no header lines. Index a .gz file with ``tabix -p bed``.
+        """
+        from cubam.bgzf import BgzfWriter
+
+        path = Path(path)
+        gz = path.suffix == ".gz"
+        with BgzfWriter(path) if gz else open(path, "wb") as out:
+            for lo in range(0, len(self.table), rows_per_slice):
+                buf = io.BytesIO()  # cuDF writes bytes faster than a str
+                self.to_frame(lo, lo + rows_per_slice).to_csv(buf, sep="\t", header=False, index=False)
+                out.write(buf.getbuffer())
 
 
 def _concat(a, b):
@@ -163,37 +255,35 @@ class _Dedup:
         self.rep = require_representative
         self.acc = acc
         self.pending = None
-        self.done = []
 
     def add(self, frag, last_ref: int, last_pos: int, final: bool):
+        """Add fragments; returns the final ones (a cuDF DataFrame sorted by position, or None) and their bound.
+
+        No later fragment has a key ``ref << 32 | start`` below the bound
+        (``None`` when ``final``).
+        """
         import cudf
 
         parts = [p for p in (self.pending, None if frag is None else cudf.DataFrame(frag)) if p is not None]
         if not parts:
-            return
+            return None, None
         df = cudf.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
         df = df.groupby(_KEY, sort=False).agg({"count": "sum", "rep": "sum"}).reset_index()
         if final:
-            fin = None
+            fin = bound = None
         elif self.margin is None:
             self.pending = df
-            return
+            return None, None
         else:
             fin = (df["ref"] < last_ref) | ((df["ref"] == last_ref) & (df["start"] < last_pos - self.margin))
+            bound = (last_ref << 32) + last_pos - self.margin
         out = df if fin is None else df[fin]
         self.pending = None if fin is None else df[~fin]
         if self.rep:
             norep = out["rep"] == 0
             self.acc["no_representative"] += norep.values.sum()
             out = out[~norep]
-        self.done.append(out.drop(columns="rep").sort_values(_KEY))
-
-    def result(self):
-        import cudf
-
-        if not self.done:
-            return cudf.DataFrame({k: cudf.Series([], dtype=t) for k, t in zip(_KEY + ["count"], "iiiQi", strict=True)})
-        return cudf.concat(self.done, ignore_index=True)
+        return out.drop(columns="rep").sort_values(_KEY), bound
 
 
 def call_fragments(
@@ -208,7 +298,7 @@ def call_fragments(
     require_proper_pair: bool = False,
     require_representative: bool = True,
     min_length: int = 1,
-    chunk_bytes: int = 256 << 20,
+    chunk_bytes: int | None = None,
 ) -> Fragments:
     """Call ATAC fragments from a coordinate-sorted, paired-end BAM file on the GPU.
 
@@ -234,14 +324,66 @@ def call_fragments(
         Drop a group of duplicates whose representative (the pair without the
         duplicate flag) fails the filters, as Cell Ranger does.
     """
-    import cupy as cp
-
     from cubam import memory_pool
 
     t0 = time.perf_counter()
     path = Path(path)
     header = BamHeader.read(path)
     header.require_coordinate_sorted(path)
+    stats: dict = {}
+    host = {k: [] for k in _DTYPES}
+    with memory_pool():
+        for part, _ in _fragment_parts(
+            path,
+            header,
+            stats,
+            keep_chroms=keep_chroms,
+            drop_chroms=drop_chroms,
+            barcode_tag=barcode_tag,
+            min_mapq=min_mapq,
+            shift=shift,
+            max_mate_distance=max_mate_distance,
+            require_proper_pair=require_proper_pair,
+            require_representative=require_representative,
+            min_length=min_length,
+            chunk_bytes=chunk_bytes,
+        ):
+            for k in host:
+                host[k].append(part[k].values.get())
+    cols = {}
+    for k in _DTYPES:  # one column at a time, freeing its parts: host memory peaks near the table size
+        v = host.pop(k)
+        cols[k] = np.concatenate(v).astype(_DTYPES[k], copy=False) if v else np.empty(0, _DTYPES[k])
+        del v
+    table = pd.DataFrame(cols, copy=False)
+    stats["fragments"] = len(table)
+    return Fragments(table, header, stats, time.perf_counter() - t0)
+
+
+def _fragment_parts(
+    path: Path,
+    header: BamHeader,
+    stats: dict,
+    *,
+    keep_chroms: list[str] | None = None,
+    drop_chroms: tuple[str, ...] = (),
+    barcode_tag: str = "CB",
+    min_mapq: int = 31,
+    shift: tuple[int, int] = (4, -5),
+    max_mate_distance: int | None = 5000,
+    require_proper_pair: bool = False,
+    require_representative: bool = True,
+    min_length: int = 1,
+    chunk_bytes: int | None = None,
+) -> Iterator:
+    """Final fragments as they come, as ``(part, bound)``: a cuDF DataFrame sorted by position on the GPU.
+
+    No later fragment has a key ``ref << 32 | start`` below ``bound``
+    (``None`` for the last part). ``stats`` is filled at the end. Run it
+    inside :func:`cubam.memory_pool`. Arguments as :func:`call_fragments`.
+    """
+    import cupy as cp
+
     n_ref = len(header.names)
     keep = keep_mask(header.names, keep_chroms, drop_chroms)
     read_filter = ReadFilter(
@@ -251,55 +393,55 @@ def call_fragments(
         same_contig_as_mate=True,
     )
 
-    with memory_pool():
-        keep_ref = cp.asarray(keep)
-        ref_len = cp.asarray(header.lengths, cp.int32)
-        keys = (
-            "records",
-            "kept_reads",
-            "no_barcode",
-            "mate_dropped",
-            "dropped_pairs",
-            "too_short",
-            "no_representative",
-        )
-        acc = {k: cp.zeros((), cp.int64) for k in keys}
-        dedup = _Dedup(max_mate_distance, require_representative, acc)
-        waiting = None
-        last_ref = last_pos = -1
-        for batch in read_bam(path, chunk_bytes):
-            acc["records"] += len(batch)
-            last_ref, last_pos = (int(x) for x in cp.stack([batch.ref[-1], batch.pos[-1]]).get())
-            if last_ref < 0:  # unplaced unmapped reads at the end
-                last_ref = n_ref
-            sub = batch.take(read_filter.mask(batch, keep_ref))
-            del batch
-            tag = sub.tag(barcode_tag)
-            bc, packable = packed_barcodes(tag)
-            acc["no_barcode"] += (~packable).sum()
-            sub = sub.take(packable)
-            acc["kept_reads"] += len(sub)
-            reads = {
-                "ref": sub.ref,
-                "pos": sub.pos,
-                "flag": sub.flag,
-                "nref": sub.nref,
-                "npos": sub.npos,
-                "hash": sub.name_hash(),
-                "bc": bc[packable],
-                "five": sub.five_prime(),
-            }
-            del sub, tag
-            pairs, waiting = _pair(_concat(waiting, reads), last_ref, last_pos, False, acc)
-            if pairs is not None:
-                frag = _fragments(*pairs, ref_len, shift, max_mate_distance, acc)
-                short = frag["end"] - frag["start"] < min_length
-                acc["too_short"] += short.sum()
-                dedup.add({k: v[~short] for k, v in frag.items()}, last_ref, last_pos, False)
-        if waiting is not None:  # mates never seen: they failed a filter
-            acc["mate_dropped"] += waiting["hash"].size
-        dedup.add(None, last_ref, last_pos, True)
-        table = dedup.result()
-        stats = {k: int(v) for k, v in acc.items()}
-    stats["fragments"] = len(table)
-    return Fragments(table, header, stats, time.perf_counter() - t0)
+    keep_ref = cp.asarray(keep)
+    ref_len = cp.asarray(header.lengths, cp.int32)
+    keys = (
+        "records",
+        "kept_reads",
+        "no_barcode",
+        "mate_dropped",
+        "dropped_pairs",
+        "too_short",
+        "no_representative",
+    )
+    acc = {k: cp.zeros((), cp.int64) for k in keys}
+    dedup = _Dedup(max_mate_distance, require_representative, acc)
+    waiting = None
+    last_ref = last_pos = -1
+    for batch in read_bam(path, chunk_bytes):
+        acc["records"] += len(batch)
+        last_ref, last_pos = (int(x) for x in cp.stack([batch.ref[-1], batch.pos[-1]]).get())
+        if last_ref < 0:  # unplaced unmapped reads at the end
+            last_ref = n_ref
+        sub = batch.take(read_filter.mask(batch, keep_ref))
+        del batch
+        tag = sub.tag(barcode_tag)
+        bc, packable = packed_barcodes(tag)
+        acc["no_barcode"] += (~packable).sum()
+        sub = sub.take(packable)
+        acc["kept_reads"] += len(sub)
+        reads = {
+            "ref": sub.ref,
+            "pos": sub.pos,
+            "flag": sub.flag,
+            "nref": sub.nref,
+            "npos": sub.npos,
+            "hash": sub.name_hash(),
+            "bc": bc[packable],
+            "five": sub.five_prime(),
+        }
+        del sub, tag
+        pairs, waiting = _pair(_concat(waiting, reads), last_ref, last_pos, False, acc)
+        if pairs is not None:
+            frag = _fragments(*pairs, ref_len, shift, max_mate_distance, acc)
+            short = frag["end"] - frag["start"] < min_length
+            acc["too_short"] += short.sum()
+            out, bound = dedup.add({k: v[~short] for k, v in frag.items()}, last_ref, last_pos, False)
+            if out is not None and len(out):
+                yield out, bound
+    if waiting is not None:  # mates never seen: they failed a filter
+        acc["mate_dropped"] += waiting["hash"].size
+    out, _ = dedup.add(None, last_ref, last_pos, True)
+    if out is not None and len(out):
+        yield out, None
+    stats.update({k: int(v) for k, v in acc.items()})

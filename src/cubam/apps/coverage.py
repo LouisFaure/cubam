@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from cubam.bam import (
     DUPLICATE,
@@ -50,9 +51,9 @@ DEFAULT_READ_FILTER = ReadFilter(min_mapq=30, exclude=UNMAPPED | SECONDARY | SUP
 class Coverage:
     """Runs of constant coverage per group.
 
-    ``runs`` is a cuDF DataFrame of ``group`` (index into ``groups``),
-    ``ref`` (index into ``header.names``), ``start``, ``end`` (0-based,
-    end exclusive) and ``value`` (count), sorted by group and position.
+    ``runs`` is a pandas DataFrame, in host memory, of ``group`` (index into
+    ``groups``), ``ref`` (index into ``header.names``), ``start``, ``end``
+    (0-based, end exclusive) and ``value`` (count), sorted by group and position.
     Runs of zero coverage are left out. ``units`` holds the number of reads,
     fragments or insertions counted in each group (the CPM denominator), and
     ``n_cells`` the number of cells of each group in the barcode list.
@@ -87,10 +88,11 @@ class Coverage:
         import cupy as cp
 
         g = self.groups.index(group)
-        r = self.runs[self.runs["group"] == g]
-        ref = r["ref"].values
-        start, end = r["start"].values, r["end"].values
-        value = r["value"].values.astype(cp.float64) * self.scale(normalize)[g]
+        lo, hi = np.searchsorted(self.runs["group"].to_numpy(), [g, g + 1])
+        r = self.runs.iloc[lo:hi]
+        ref = cp.asarray(r["ref"].to_numpy())
+        start, end = cp.asarray(r["start"].to_numpy()), cp.asarray(r["end"].to_numpy())
+        value = cp.asarray(r["value"].to_numpy()).astype(cp.float64) * self.scale(normalize)[g]
         if bin_size and bin_size > 1:
             ref_len = cp.asarray(self.header.lengths, cp.int64)
             ref, start, end, value = _bin(ref, start, end, value, int(bin_size), ref_len)
@@ -160,7 +162,10 @@ class _Runs:
     with a key below the threshold passed to :meth:`add` are final: no later
     event can come before them. The run that starts at the last final event
     of a group stays open (``open_key``, ``carry``) until the next one.
+    Finished runs move to host memory, one list per group.
     """
+
+    _COLS = ("ref", "start", "end", "value")
 
     def __init__(self, n_groups: int, ref_len):
         import cupy as cp
@@ -169,7 +174,7 @@ class _Runs:
         self.carry = cp.zeros(n_groups, cp.int64)
         self.ref_len = ref_len
         self.pending = None
-        self.out = []
+        self.out = [[] for _ in range(n_groups)]
 
     def add(self, g, key, delta, threshold: int | None):
         import cupy as cp
@@ -230,30 +235,26 @@ class _Runs:
         i = cp.flatnonzero(nxt & (val != 0))
         ref = (key[i] >> 32).astype(cp.int32)
         end = cp.where((key[i + 1] >> 32) == ref, key[i + 1] & 0xFFFFFFFF, self.ref_len[ref])
-        self.out.append(
-            {
-                "group": g[i],
-                "ref": ref,
-                "start": (key[i] & 0xFFFFFFFF).astype(cp.int32),
-                "end": end.astype(cp.int32),
-                "value": val[i].astype(cp.int32),
-            }
-        )
+        # runs come sorted by group, then position: one host slice per group
+        cols = cp.stack([ref, (key[i] & 0xFFFFFFFF).astype(cp.int32), end.astype(cp.int32), val[i].astype(cp.int32)])
+        n = len(self.out)
+        bounds = np.searchsorted(g[i].get(), np.arange(n + 1))
+        cols = cols.get()
+        for k in np.flatnonzero(np.diff(bounds)):
+            self.out[k].append(cols[:, bounds[k] : bounds[k + 1]])
         li = cp.flatnonzero(~nxt)
         self.carry[g[li]] = val[li]
         self.open_key[g[li]] = cp.where(val[li] != 0, key[li], -1)
 
-    def result(self):
-        import cudf
-        import cupy as cp
-
+    def result(self) -> pd.DataFrame:
         if self.pending is not None or bool((self.open_key >= 0).any()):
             raise RuntimeError("Coverage runs still open at the end")
-        if not self.out:
-            cols = ("group", "ref", "start", "end", "value")
-            return cudf.DataFrame({k: cudf.Series([], dtype="int32") for k in cols})
-        cols = {k: cp.concatenate([o[k] for o in self.out]) for k in self.out[0]}
-        return cudf.DataFrame(cols).sort_values(["group", "ref", "start"]).reset_index(drop=True)
+        sizes = [sum(p.shape[1] for p in o) for o in self.out]
+        cols = {"group": np.repeat(np.arange(len(sizes), dtype=np.int32), sizes)}
+        for j, k in enumerate(self._COLS):
+            cols[k] = np.concatenate([p[j] for o in self.out for p in o] or [np.empty(0, np.int32)])
+        self.out = [[] for _ in self.out]
+        return pd.DataFrame(cols, copy=False)
 
 
 def _events(g, ref, start, end):
@@ -264,6 +265,19 @@ def _events(g, ref, start, end):
     key = cp.concatenate([r | start.astype(cp.int64), r | end.astype(cp.int64)])
     delta = cp.concatenate([cp.ones(start.size, cp.int32), cp.full(start.size, -1, cp.int32)])
     return cp.concatenate([g, g]), key, delta
+
+
+#: Rows of a host fragments table moved to the GPU at a time
+_TABLE_ROWS = 8_000_000
+
+
+def _table_parts(frags):
+    """Slices of a :class:`~cubam.apps.fragments.Fragments` table on the GPU, as ``(part, bound)`` like the stream."""
+    table, hi = frags.table, 0
+    for part in frags.iter_gpu(_TABLE_ROWS):
+        hi += len(part)
+        bound = None if hi == len(table) else (int(table["ref"].iat[hi]) << 32) + int(table["start"].iat[hi])
+        yield part, bound
 
 
 def _group_sizes(cells: CellIndex) -> tuple[list, np.ndarray]:
@@ -282,7 +296,7 @@ def coverage(
     split_deletions: bool = False,
     keep_chroms: list[str] | None = None,
     drop_chroms: tuple[str, ...] = (),
-    chunk_bytes: int = 256 << 20,
+    chunk_bytes: int | None = None,
 ) -> Coverage:
     """Coverage of the aligned blocks of reads, per group of cells.
 
@@ -374,7 +388,7 @@ def fragment_coverage(
     import cupy as cp
 
     from cubam import memory_pool
-    from cubam.apps.fragments import Fragments, call_fragments
+    from cubam.apps.fragments import Fragments, _fragment_parts
 
     t0 = time.perf_counter()
     if mode not in ("insertions", "fragments"):
@@ -382,40 +396,43 @@ def fragment_coverage(
     if insertion_width < 1:
         raise ValueError("insertion_width must be at least 1")
     groups, n_cells = _group_sizes(cells)
-    frags = source if isinstance(source, Fragments) else call_fragments(source, **fragment_kw)
-    header = frags.header
-    t = frags.table
-    stats = {"fragments": len(t)}
+    stats: dict = {}
     with memory_pool():
+        if isinstance(source, Fragments):
+            header, parts = source.header, _table_parts(source)
+        else:
+            header = BamHeader.read(source)
+            header.require_coordinate_sorted(source)
+            parts = _fragment_parts(Path(source), header, stats, **fragment_kw)
         ref_len = cp.asarray(header.lengths, cp.int64)
         runs = _Runs(len(groups), ref_len)
         units = cp.zeros(len(groups), cp.int64)
-        refs = t["ref"].values
-        bounds = cp.searchsorted(refs, cp.arange(len(header.names) + 1, dtype=refs.dtype)).get()
-        in_cells = 0
-        for r in range(len(header.names)):
-            lo, hi = int(bounds[r]), int(bounds[r + 1])
-            if hi == lo:
-                continue
-            grp = cells.group(cells.lookup_packed(t["bc"].values[lo:hi]))
+        in_cells = n_frags = 0
+        for part, bound in parts:
+            n_frags += len(part)
+            grp = cells.group(cells.lookup_packed(part["bc"].values))
             k = cp.flatnonzero(grp >= 0)
             in_cells += int(k.size)
             grp = grp[k]
-            start = t["start"].values[lo:hi][k].astype(cp.int64)
-            end = t["end"].values[lo:hi][k].astype(cp.int64)
-            ref = cp.full(k.size, r, cp.int32)
+            ref = part["ref"].values[k]
+            start = part["start"].values[k].astype(cp.int64)
+            end = part["end"].values[k].astype(cp.int64)
+            del part
             if mode == "fragments":
                 units += cp.bincount(grp, minlength=len(groups))
-                runs.add(*_events(grp, ref, start, end), None)
+                runs.add(*_events(grp, ref, start, end), bound)
                 continue
+            # insertions of later fragments start at least insertion_width // 2 before their start
             units += 2 * cp.bincount(grp, minlength=len(groups))
             p = cp.concatenate([start, end - 1]) - insertion_width // 2
-            s = cp.clip(p, 0, ref_len[r])
-            e = cp.clip(p + insertion_width, 0, ref_len[r])
+            lim = ref_len[cp.concatenate([ref, ref])]
+            s = cp.clip(p, 0, lim)
+            e = cp.clip(p + insertion_width, 0, lim)
             g2, r2 = cp.concatenate([grp, grp]), cp.concatenate([ref, ref])
             w = e > s
-            runs.add(*_events(g2[w], r2[w], s[w], e[w]), None)
+            runs.add(*_events(g2[w], r2[w], s[w], e[w]), None if bound is None else bound - insertion_width)
+        runs.finish()
         table = runs.result()
-    stats.update(fragments_in_cells=in_cells, runs=len(table))
+    stats.update(fragments=n_frags, fragments_in_cells=in_cells, runs=len(table))
     unit = "insertions" if mode == "insertions" else "fragments"
     return Coverage(table, header, groups, units.get(), n_cells, unit, stats, time.perf_counter() - t0)
