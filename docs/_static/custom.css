@@ -32,16 +32,29 @@ html[data-theme="dark"] {
 html[data-theme="dark"] {
     --scverse-color-background: oklch(18% 0.012 70);
     --scverse-color-surface-alt: oklch(21% 0.016 70); /* search field */
-    --scverse-color-surface: oklch(25% 0.02 70); /* inline code, copy buttons */
-    --scverse-color-border-muted: oklch(31% 0.02 70);
+    /* code blocks, inline code, copy buttons; as light as pydata-sphinx-theme's
+       dark surface (#29313d), so they stand out from the page */
+    --scverse-color-surface: oklch(31% 0.022 70);
+    /* inline code border, above the surface */
+    --scverse-color-border-muted: oklch(37% 0.022 70);
     --scverse-color-border: oklch(41% 0.024 70);
     --scverse-color-text: oklch(91% 0.018 80);
     --scverse-color-text-secondary: oklch(80% 0.02 75);
-    --scverse-color-text-muted: oklch(67% 0.022 70);
+    /* 5:1 or more on the cards and code surface */
+    --scverse-color-text-muted: oklch(71% 0.022 70);
     --scverse-color-heading: oklch(86% 0.016 78);
     --scverse-color-code-bg: oklch(20% 0.014 70);
     --scverse-color-footer-bg: oklch(22% 0.018 70);
-    --pst-color-on-background: oklch(23% 0.022 70); /* cards */
+    /* cards, admonitions, tabs, dropdowns: lighter than the page, a step below
+       the code surface */
+    --pst-color-on-background: oklch(27% 0.024 70);
+    /* Tables: the theme stripes the rows with the surface and card shades, so
+       the first row has the header's shade. The header keeps the surface; the
+       rows step down from it, the first one darkest, and the inner borders are
+       sepia instead of the theme's slate. */
+    --pst-color-table-row-zebra-low-bg: oklch(22% 0.016 70);
+    --pst-color-table-row-zebra-high-bg: oklch(25% 0.02 70);
+    --pst-color-table-inner-border: var(--scverse-color-border-muted);
 }
 
 /* ── Logo ──────────────────────────────────────────────────────────────── */
@@ -101,6 +114,7 @@ code.literal {
 }
 
 html[data-theme="dark"] code.literal {
+    background-color: var(--pst-color-surface);
     border-color: var(--pst-color-border-muted);
 }
 
