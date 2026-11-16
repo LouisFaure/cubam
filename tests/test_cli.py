@@ -57,7 +57,7 @@ def test_sizes():
 
 
 def test_help_of_every_command(capsys):
-    for cmd in ("fragments", "coverage", "split", "sort", "count", "velocity"):
+    for cmd in ("fragments", "coverage", "split", "sort", "markdup", "count", "velocity"):
         with pytest.raises(SystemExit) as e:
             build_parser().parse_args([cmd, "--help"])
         assert e.value.code == 0

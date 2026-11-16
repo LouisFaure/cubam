@@ -16,6 +16,7 @@ alleles
 coverage
 split
 sort
+markdup
 features
 velocity
 bgzf
@@ -81,6 +82,14 @@ One BAM file per group of cells or per cell.
 :shadow: none
 
 A BAM file sorted by coordinate or by read name, as samtools sort.
+:::
+
+:::{grid-item-card} {fas}`clone` Duplicate marking — `cubam.apps.markdup`
+:link: markdup
+:link-type: doc
+:shadow: none
+
+Duplicate flags as samtools markdup, optionally within a cell barcode.
 :::
 
 :::{grid-item-card} {fas}`table-cells` Feature counts — `cubam.apps.features`
