@@ -57,6 +57,21 @@ html[data-theme="dark"] {
     --pst-color-table-inner-border: var(--scverse-color-border-muted);
 }
 
+/* Tabs (CLI and Python examples): no background of their own, as on light
+   pages, where they are white like the page; cards keep the lighter shade */
+html[data-theme="dark"] .bd-content .sd-tab-set .sd-tab-content {
+    background-color: transparent;
+}
+/* The selected tab sits over the top border of the content and hides it
+   under its own fill: the page's colour, not transparent */
+html[data-theme="dark"] .bd-content .sd-tab-set > input:checked + label {
+    background-color: var(--pst-color-background);
+}
+/* The other tabs: the code surface, as the light pages' grey tabs */
+html[data-theme="dark"] .bd-content .sd-tab-set > label {
+    background-color: var(--pst-color-surface);
+}
+
 /* ── Logo ──────────────────────────────────────────────────────────────── */
 /* The theme puts the logo in the sidebar with `height: 100%; width: auto` on an
    auto-height link. The SVG has a viewBox but no width or height, so it has no
