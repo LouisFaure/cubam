@@ -25,6 +25,7 @@ Intel Xeon at 2.6 GHz (Platinum 8358 or Gold 6348).
 | Coverage, ATAC | | | 36 s | | 54 s |
 | Split, GEX | sinto filterbarcodes | 871 s | 21 s | 42× | 25 s |
 | Split, ATAC | sinto filterbarcodes | 1,633 s | 54 s | 30× | 65 s |
+| Sort by name, GEX | samtools sort -n | 978 s | 100 s | 9.8× | 241 s |
 | Feature counts, GEX | featureCounts (no cells, no UMIs) | 56 s | 16 s | 3.6× | 17 s |
 | Velocity, GEX | velocyto run | 7,030 s | 30 s | 238× | 46 s |
 
@@ -41,6 +42,9 @@ What each CPU tool ran (`benchmarks/speed_baselines.sh`):
   `bedtools genomecov -bg -split`, then `bedGraphToBigWig`, 6 groups at a
   time. cubam writes CPM-normalised bigWig files.
 - **Split**: `sinto filterbarcodes -p 6`, one BAM per group.
+- **Sort**: `samtools sort -n -@ 6`, of the whole file, with its default
+  memory (768 MB per thread) and zlib level 6. cubam writes the same
+  records in the same order, at nvCOMP level 2 (a file 13% larger).
 - **Feature counts**: `featureCounts -T 6 -t exon -s 1 -M` counts reads per
   gene for the whole file. It does less than cubam, which counts UMIs per
   cell and gene.
@@ -60,6 +64,7 @@ Peak GPU memory in use (CUDA context included) and peak host memory:
 | Coverage, ATAC | 10.4 GB | 6.1 GB | 7 GB |
 | Split, GEX | 13.2 GB | 6.3 GB | 2 GB |
 | Split, ATAC | 10.6 GB | 5.6 GB | 2 GB |
+| Sort by name, GEX | 20.4 GB | 6.4 GB | 3 to 6 GB |
 | Feature counts, GEX | 8.2 GB | 3.8 GB | 2 GB |
 | Velocity, GEX | 16.1 GB | 4.0 GB | 3 to 12 GB |
 

@@ -42,6 +42,27 @@ __global__ void copy_spans(const unsigned char* __restrict__ src, unsigned char*
     for (long long i = lane; i < size[w]; i += 32) d[i] = s[i];
 }
 
+// Bytes of BAM records (their length field + 4) in several buffers: record i at src_ptr[src[i]] + off[i]
+__global__ void record_sizes_at(const unsigned long long* __restrict__ src_ptr, const int* __restrict__ src,
+                                const long long* __restrict__ off, long long n, long long* __restrict__ size) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size[i] = 4 + (long long)u32((const unsigned char*)src_ptr[src[i]], off[i]);
+}
+
+// copy_spans from several buffers: span i is read from the buffer at src_ptr[src[i]]
+__global__ void gather_spans(const unsigned long long* __restrict__ src_ptr, const int* __restrict__ src,
+                             const long long* __restrict__ src_off, unsigned char* __restrict__ dst,
+                             const long long* __restrict__ dst_off, const long long* __restrict__ size,
+                             long long n) {
+    long long w = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane = threadIdx.x & 31;
+    if (w >= n) return;
+    const unsigned char* s = (const unsigned char*)src_ptr[src[w]] + src_off[w];
+    unsigned char* d = dst + dst_off[w];
+    for (long long i = lane; i < size[w]; i += 32) d[i] = s[i];
+}
+
 // ------------------------------------------------------------------ BGZF
 
 // Complete BGZF blocks: the fixed header fields (XLEN 6, one BC subfield) and a block that fits
@@ -68,22 +89,55 @@ __global__ void bgzf_sizes(const unsigned char* b, const long long* start, long 
 }
 
 // CRC32 (zlib polynomial) of spans, one thread per span; the table is built in shared memory
+// a * b modulo the CRC32 polynomial, in the reflected representation of zlib (multmodp)
+__device__ __forceinline__ unsigned int crc_mulmod(unsigned int a, unsigned int b) {
+    unsigned int m = 1u << 31, p = 0;
+    for (;;) {
+        if (a & m) {
+            p ^= b;
+            if ((a & (m - 1)) == 0) break;
+        }
+        m >>= 1;
+        b = b & 1 ? (b >> 1) ^ 0xEDB88320u : b >> 1;
+    }
+    return p;
+}
+
+// CRC32 (zlib) of spans, one warp per span. Each lane takes the CRC of 1/32 of the span; the CRCs
+// are combined as zlib's crc32_combine: crc(AB) = crc(A) * x^(8 len(B)) + crc(B).
 __global__ void crc32_spans(const unsigned char* b, const long long* off, const long long* len, long long n,
                             unsigned int* out) {
     __shared__ unsigned int table[256];
+    __shared__ unsigned int x2n[64];  // x^(2^k) modulo the polynomial
     unsigned int t = threadIdx.x;
     for (unsigned int k = t; k < 256; k += blockDim.x) {
         unsigned int c = k;
         for (int j = 0; j < 8; j++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
         table[k] = c;
     }
+    if (t == 0) {
+        unsigned int p = 1u << 30;  // x^1
+        x2n[0] = p;
+        for (int k = 1; k < 64; k++) x2n[k] = p = crc_mulmod(p, p);
+    }
     __syncthreads();
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const unsigned char* p = b + off[i];
+    long long w = ((long long)blockIdx.x * blockDim.x + t) >> 5;
+    unsigned int lane = t & 31;
+    if (w >= n) return;
+    long long l = len[w], seg = (l + 31) / 32;
+    long long s = lane * seg < l ? lane * seg : l, e = s + seg < l ? s + seg : l;
+    const unsigned char* p = b + off[w];
     unsigned int c = 0xFFFFFFFFu;
-    for (long long k = 0; k < len[i]; k++) c = table[(c ^ p[k]) & 255] ^ (c >> 8);
-    out[i] = c ^ 0xFFFFFFFFu;
+    for (long long k = s; k < e; k++) c = table[(c ^ p[k]) & 255] ^ (c >> 8);
+    c ^= 0xFFFFFFFFu;
+    // shift by the bytes after the segment: times x^(8 (l - e))
+    unsigned long long after = (unsigned long long)(l - e);
+    unsigned int m = 1u << 31;  // x^0
+    for (int k = 3; after; after >>= 1, k++)
+        if (after & 1) m = crc_mulmod(x2n[k & 63], m);
+    c = e > s ? crc_mulmod(m, c) : 0;
+    for (int o = 16; o; o >>= 1) c ^= __shfl_xor_sync(0xffffffffu, c, o);
+    if (lane == 0) out[w] = c;
 }
 
 // Adler-32 of spans, one thread per span
@@ -514,6 +568,39 @@ __global__ void pack_acgt(const unsigned char* b, const long long* voff, const i
     if (nb == 0) good = false;
     out[i] = good ? (code | ((unsigned long long)nb << 48) | (suffix << 53)) : 0;
     ok[i] = good;
+}
+
+// Read names as keys whose byte order is the natural order of samtools sort -n (strnum_cmp):
+// each run of digits becomes '0', 1 + its length without leading zeros, and those digits.
+// With fill = 0, writes the length of each key to len; with fill = 1, the keys at dst_off.
+__global__ void natural_name(const unsigned char* b, const long long* off, long long n, int fill,
+                             const long long* dst_off, long long* len, unsigned char* chars) {
+    long long r = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= n) return;
+    const unsigned char* q = b + off[r] + 36;
+    int l = (int)b[off[r] + 12] - 1;
+    unsigned char* d = fill ? chars + dst_off[r] : 0;
+    long long k = 0;
+    int i = 0;
+    while (i < l) {
+        unsigned char c = q[i];
+        if (c < '0' || c > '9') {
+            if (fill) d[k] = c;
+            k++;
+            i++;
+            continue;
+        }
+        while (i < l && q[i] == '0') i++;
+        int s = i;
+        while (i < l && q[i] >= '0' && q[i] <= '9') i++;
+        if (fill) {
+            d[k] = '0';
+            d[k + 1] = (unsigned char)(i - s + 1);
+            for (int j = s; j < i; j++) d[k + 2 + j - s] = q[j];
+        }
+        k += 2 + i - s;
+    }
+    if (!fill) len[r] = k;
 }
 
 // Unpack codes of pack_acgt into chars at offsets

@@ -28,6 +28,7 @@ from cubam.apps.alleles import count_alleles
 from cubam.apps.coverage import coverage, fragment_coverage
 from cubam.apps.features import count_features
 from cubam.apps.fragments import call_fragments
+from cubam.apps.sort import sort_bam
 from cubam.apps.split import split_bam
 from cubam.apps.velocity import count_velocity
 from cubam.cells import CellIndex, _read_barcodes
@@ -106,6 +107,11 @@ def main():
 
         return run
 
+    def sort_by_name():
+        out = w / "cubam_sort_gex.bam"
+        sort_bam(gex, out, by="name")
+        out.unlink()
+
     def features():
         genes = IntervalIndex.from_gtf(a.gtf, feature="exon", group_by="gene_id")
         res = count_features(gex, genes, rna_bc, umi_tag="UB", strand="sense")
@@ -122,6 +128,7 @@ def main():
         "coverage_atac": atac_coverage,
         "split_gex": split(gex, rna_cells),
         "split_atac": split(atac, atac_cells),
+        "sort_gex": sort_by_name,
         "features_gex": features,
         "velocity_gex": velocity,
     }

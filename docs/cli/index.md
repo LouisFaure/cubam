@@ -1,6 +1,6 @@
 # Command line
 
-The `cubam` command runs each application on a BAM file and writes its usual
+The `cubam` command runs each application on a BAM file and writes the usual
 output files, so most analyses need no Python:
 
 ```bash
@@ -13,7 +13,7 @@ cubam velocity gex_possorted_bam.bam --gtf genes.gtf \
     --barcodes barcodes.tsv.gz -o sample.h5ad
 ```
 
-The options of a command are the parameters of its Python function, with
+The options of a command are the parameters of the corresponding Python function, with
 the same defaults. `cubam <command> --help` lists them, and works on a
 machine without a GPU.
 
@@ -25,6 +25,7 @@ fragments
 cellsnp
 coverage
 split
+sort
 markdup
 count
 velocity
@@ -65,6 +66,14 @@ One bigWig track per group of barcodes, from reads or ATAC fragments.
 One BAM file per group of barcodes, or per barcode.
 :::
 
+:::{grid-item-card} {fas}`arrow-down-a-z` cubam sort
+:link: sort
+:link-type: doc
+:shadow: none
+
+A BAM file sorted by coordinate or by read name, as samtools sort.
+:::
+
 :::{grid-item-card} {fas}`clone` cubam markdup
 :link: markdup
 :link-type: doc
@@ -95,7 +104,7 @@ Spliced, unspliced and ambiguous counts, as velocyto, for scVelo.
 
 `--barcodes` gives the barcodes to keep: cells, but also spots or beads.
 It takes a list with one barcode per line, such as `barcodes.tsv.gz` of
-Cell Ranger, or a CSV or TSV table with the barcodes in its first column.
+Cell Ranger, or a CSV or TSV table with the barcodes in the first column.
 
 `coverage` and `split` work per group of barcodes (a cluster, a cell type,
 a sample), given by the second column of the table:
@@ -109,7 +118,7 @@ AAACAGCCAATCCCTT-1,CD14 monocytes
 The first line is a header when it starts with a name such as `barcode`,
 `cell` or `spot`, or with an empty field, as in the CSV files written by
 pandas (`adata.obs[["leiden"]].to_csv("clusters.csv")`) and by R. Pick
-another column with `--group-column`, by its name or its number. A barcode
+another column with `--group-column`, by name or number. A barcode
 with an empty group belongs to no group.
 
 ## Options of every command

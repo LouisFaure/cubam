@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from cubam._kernels import append_offsets, chain, copy_spans, launch
-from cubam.bgzf import inflate_chunks
+from cubam.bgzf import _inflate
 
 #: SAM flags
 PAIRED, PROPER_PAIR, UNMAPPED, MATE_UNMAPPED = 0x1, 0x2, 0x4, 0x8
@@ -102,16 +102,24 @@ class BamHeader:
 
 def _strings_at(data, offset, length):
     """A cuDF string column of ``data[offset[i] : offset[i] + length[i]]``."""
-    import cudf
     import cupy as cp
-    import pylibcudf as plc
 
     n = int(offset.size)
     offsets = cp.zeros(n + 1, cp.int64)
     cp.cumsum(length, out=offsets[1:])
-    total = int(offsets[-1])
-    chars = cp.empty(max(total, 1), cp.uint8)
+    chars = cp.empty(max(int(offsets[-1]), 1), cp.uint8)
     copy_spans(data, chars, offset, offsets[:-1], length)
+    return _string_series(chars, offsets)
+
+
+def _string_series(chars, offsets):
+    """A cuDF string column of the strings ``chars[offsets[i] : offsets[i + 1]]`` (int64 offsets)."""
+    import cudf
+    import cupy as cp
+    import pylibcudf as plc
+
+    n = int(offsets.size) - 1
+    total = int(offsets[-1])
     if total < 2**31 - 1:
         offsets = offsets.astype(cp.int32)
     col = plc.Column(
@@ -423,14 +431,12 @@ def read_bam(path: str | Path, chunk_bytes: int | None = None, **reader_kw) -> I
     header = BamHeader.read(path)
     n_ref = len(header.names)
     skip = header.size
-    carry = cp.empty(0, cp.uint8)  # bytes of the incomplete last record
-    for text in inflate_chunks(path, chunk_bytes, **reader_kw):
-        if skip:
-            k = min(skip, int(text.size))
-            text = text[k:]
+    carry = cp.empty(0, cp.uint8)  # bytes of the incomplete last record, inflated in front of the next chunk
+    for data in _inflate(path, chunk_bytes, lambda: carry, **reader_kw):  # noqa: B023  (the carry of now)
+        if skip:  # header bytes: no record started yet, so nothing was put in front
+            k = min(skip, int(data.size))
+            data = data[k:]
             skip -= k
-        data = cp.concatenate([carry, text]) if carry.size else text
-        del text
         offset, tail = _record_chain(data, n_ref)
         carry = data[tail:].copy()
         if offset.size:
