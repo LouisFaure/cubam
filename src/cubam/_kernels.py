@@ -68,22 +68,55 @@ __global__ void bgzf_sizes(const unsigned char* b, const long long* start, long 
 }
 
 // CRC32 (zlib polynomial) of spans, one thread per span; the table is built in shared memory
+// a * b modulo the CRC32 polynomial, in the reflected representation of zlib (multmodp)
+__device__ __forceinline__ unsigned int crc_mulmod(unsigned int a, unsigned int b) {
+    unsigned int m = 1u << 31, p = 0;
+    for (;;) {
+        if (a & m) {
+            p ^= b;
+            if ((a & (m - 1)) == 0) break;
+        }
+        m >>= 1;
+        b = b & 1 ? (b >> 1) ^ 0xEDB88320u : b >> 1;
+    }
+    return p;
+}
+
+// CRC32 (zlib) of spans, one warp per span. Each lane takes the CRC of 1/32 of the span; the CRCs
+// are combined as zlib's crc32_combine: crc(AB) = crc(A) * x^(8 len(B)) + crc(B).
 __global__ void crc32_spans(const unsigned char* b, const long long* off, const long long* len, long long n,
                             unsigned int* out) {
     __shared__ unsigned int table[256];
+    __shared__ unsigned int x2n[64];  // x^(2^k) modulo the polynomial
     unsigned int t = threadIdx.x;
     for (unsigned int k = t; k < 256; k += blockDim.x) {
         unsigned int c = k;
         for (int j = 0; j < 8; j++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
         table[k] = c;
     }
+    if (t == 0) {
+        unsigned int p = 1u << 30;  // x^1
+        x2n[0] = p;
+        for (int k = 1; k < 64; k++) x2n[k] = p = crc_mulmod(p, p);
+    }
     __syncthreads();
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const unsigned char* p = b + off[i];
+    long long w = ((long long)blockIdx.x * blockDim.x + t) >> 5;
+    unsigned int lane = t & 31;
+    if (w >= n) return;
+    long long l = len[w], seg = (l + 31) / 32;
+    long long s = lane * seg < l ? lane * seg : l, e = s + seg < l ? s + seg : l;
+    const unsigned char* p = b + off[w];
     unsigned int c = 0xFFFFFFFFu;
-    for (long long k = 0; k < len[i]; k++) c = table[(c ^ p[k]) & 255] ^ (c >> 8);
-    out[i] = c ^ 0xFFFFFFFFu;
+    for (long long k = s; k < e; k++) c = table[(c ^ p[k]) & 255] ^ (c >> 8);
+    c ^= 0xFFFFFFFFu;
+    // shift by the bytes after the segment: times x^(8 (l - e))
+    unsigned long long after = (unsigned long long)(l - e);
+    unsigned int m = 1u << 31;  // x^0
+    for (int k = 3; after; after >>= 1, k++)
+        if (after & 1) m = crc_mulmod(x2n[k & 63], m);
+    c = e > s ? crc_mulmod(m, c) : 0;
+    for (int o = 16; o; o >>= 1) c ^= __shfl_xor_sync(0xffffffffu, c, o);
+    if (lane == 0) out[w] = c;
 }
 
 // Adler-32 of spans, one thread per span

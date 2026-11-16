@@ -215,7 +215,37 @@ def _check(rc: int, what: str) -> None:
         raise RuntimeError(f"nvCOMP {what} failed (status {rc})")
 
 
-def _deflate_spans(data, off, size, level: int = 1, max_chunks: int = 4096):
+def _chunks_per_call(level: int) -> int:
+    """Deflate chunks of 64 KiB per nvCOMP call: 4096, fewer while their buffers need over half the free GPU memory.
+
+    nvCOMP needs about 0.5 MB (level 1) to 1.2 MB (level 5) of buffers per
+    chunk, and runs faster with more chunks per call (about 16 GB/s with
+    4096 chunks at level 2 on an H200, 7 GB/s with 1024).
+    """
+    import cupy as cp
+
+    per = _chunk_cost.get(level)
+    if per is None:
+        lib = _nvcomp_compress_lib()
+        opts = _CompressOpts(algorithm=level)
+        temp, max_out = ctypes.c_size_t(), ctypes.c_size_t()
+        _check(
+            lib.nvcompBatchedDeflateCompressGetTempSizeAsync(4096, 1 << 16, opts, ctypes.byref(temp), 1 << 28),
+            "temp size",
+        )
+        _check(lib.nvcompBatchedDeflateCompressGetMaxOutputChunkSize(1 << 16, opts, ctypes.byref(max_out)), "size")
+        per = _chunk_cost[level] = int(temp.value) // 4096 + 2 * int(max_out.value)
+    free, _ = cp.cuda.runtime.memGetInfo()
+    m = 4096
+    while m > 256 and m * per > free // 2:
+        m //= 2
+    return m
+
+
+_chunk_cost: dict = {}
+
+
+def _deflate_spans(data, off, size, level: int = 1, max_chunks: int | None = None):
     """Raw Deflate streams of ``data[off[i] : off[i] + size[i]]`` (cupy), each at most 65,536 bytes.
 
     ``level`` is the nvCOMP Deflate algorithm, 0 (entropy coding only) to 5.
@@ -224,9 +254,12 @@ def _deflate_spans(data, off, size, level: int = 1, max_chunks: int = 4096):
     at 0.2 GB/s. Returns ``(out,
     out_off, out_size)``: the streams packed in one cupy buffer, with their
     offsets and sizes. nvCOMP sizes its buffers for the worst case (about
-    twice the input), so chunks are compressed ``max_chunks`` at a time.
+    twice the input), so chunks are compressed ``max_chunks`` at a time
+    (default: :func:`_chunks_per_call`).
     """
     import cupy as cp
+
+    max_chunks = max_chunks or _chunks_per_call(level)
 
     off = cp.asarray(off, cp.int64)
     size = cp.asarray(size, cp.int64)
@@ -318,19 +351,19 @@ def _deflate_batch(data, off, size, level: int):
     return out, out_off, out_size.astype(cp.int64)
 
 
-def _checksum(kernel: str, data, off, size):
+def _checksum(kernel: str, data, off, size, threads_per_item: int = 1):
     import cupy as cp
 
     off = cp.asarray(off, cp.int64)
     size = cp.asarray(size, cp.int64)
     out = cp.empty(int(size.size), cp.uint32)
-    launch(kernel, int(size.size), data, off, size, np.int64(size.size), out)
+    launch(kernel, int(size.size), data, off, size, np.int64(size.size), out, threads_per_item=threads_per_item)
     return out
 
 
 def _crc32_spans(data, off, size):
-    """CRC32 (as ``zlib.crc32``) of ``data[off[i] : off[i] + size[i]]``, one uint32 per span."""
-    return _checksum("crc32_spans", data, off, size)
+    """CRC32 (as ``zlib.crc32``) of ``data[off[i] : off[i] + size[i]]``, one uint32 per span (a warp each)."""
+    return _checksum("crc32_spans", data, off, size, threads_per_item=32)
 
 
 def _adler32_spans(data, off, size):
@@ -395,9 +428,24 @@ class BgzfWriter:
     :meth:`write` appends bytes (cupy uint8 or bytes); full blocks are
     compressed on the GPU once ``flush_bytes`` are buffered. :meth:`close`
     compresses the rest and adds the EOF block.
+
+    The compressed blocks are copied to one of two pinned host buffers and
+    written by background threads while the GPU goes on: a copy to new
+    pageable memory runs at about 0.4 GB/s, and network file systems write
+    about twice as fast with several requests in flight.
     """
 
-    def __init__(self, path: str | Path, level: int = 2, flush_bytes: int = 1024 * BLOCK_DATA):
+    def __init__(
+        self,
+        path: str | Path,
+        level: int = 2,
+        flush_bytes: int = 1024 * BLOCK_DATA,
+        *,
+        n_threads: int = 8,
+        piece: int = 16 << 20,
+    ):
+        from concurrent.futures import ThreadPoolExecutor
+
         import cupy as cp
 
         self.path = Path(path)
@@ -407,6 +455,42 @@ class BgzfWriter:
         self._pending: list = []
         self._n = 0
         self._cp = cp
+        self._io = ThreadPoolExecutor(n_threads)
+        self._piece = piece
+        self._pos = 0  # where the next bytes go in the file
+        self._host: list = [None, None]  # pinned buffers
+        self._writes: list = [[], []]  # the writes of each buffer in flight
+        self._turn = 0
+
+    @staticmethod
+    def _pwrite(fd: int, mv: memoryview, offset: int) -> None:
+        while len(mv):
+            n = os.pwrite(fd, mv, offset)
+            mv, offset = mv[n:], offset + n
+
+    def _put(self, out) -> None:
+        """Copy ``out`` (cupy uint8) to a pinned buffer and write it in the background."""
+        i, self._turn = self._turn, self._turn ^ 1
+        for f in self._writes[i]:
+            f.result()  # the buffer is free again
+        n = int(out.size)
+        if self._host[i] is None or self._host[i].size < n:
+            self._host[i] = None
+            size = max(n, 2 * self.flush_bytes)
+            self._host[i] = np.frombuffer(self._cp.cuda.alloc_pinned_memory(size), np.uint8, size)
+        host = self._host[i][:n]
+        out.get(out=host)
+        mv, fd = memoryview(host), self._fh.fileno()
+        self._writes[i] = [
+            self._io.submit(self._pwrite, fd, mv[a : a + self._piece], self._pos + a) for a in range(0, n, self._piece)
+        ]
+        self._pos += n
+
+    def _drain(self) -> None:
+        for i, fs in enumerate(self._writes):
+            self._writes[i] = []
+            for f in fs:
+                f.result()
 
     def write(self, data) -> None:
         cp = self._cp
@@ -425,19 +509,28 @@ class BgzfWriter:
         buf = cp.concatenate(self._pending) if len(self._pending) > 1 else self._pending[0]
         cut = int(buf.size) if final else int(buf.size) // BLOCK_DATA * BLOCK_DATA
         if cut:
-            self._fh.write(_bgzf_compress(buf[:cut], self.level).get().tobytes())
+            self._put(_bgzf_compress(buf[:cut], self.level))
         rest = buf[cut:]
         self._pending = [rest.copy()] if rest.size else []
         self._n = int(rest.size)
+
+    def flush(self) -> None:
+        """Compress and write what is buffered, so that the next bytes start a new block."""
+        self._flush(final=True)
 
     def close(self) -> None:
         if self._fh.closed:
             return
         try:
             self._flush(final=True)
-            self._fh.write(EOF_BLOCK)
+            self._drain()
+            self._pwrite(self._fh.fileno(), memoryview(EOF_BLOCK), self._pos)
         finally:
-            self._fh.close()
+            try:
+                self._drain()
+            finally:
+                self._io.shutdown()
+                self._fh.close()
 
     def __enter__(self) -> BgzfWriter:
         return self
@@ -446,20 +539,23 @@ class BgzfWriter:
         self.close()
 
 
-def _inflate_blocks(buf, eof: bool):
+def _inflate_blocks(buf, eof: bool, prefix=None):
     """Inflate the complete BGZF blocks of ``buf`` (cupy uint8, starting at a block).
 
     Returns the inflated data and the number of bytes of ``buf`` used. When
-    ``eof``, ``buf`` must end with a complete block.
+    ``eof``, ``buf`` must end with a complete block. The data starts with
+    ``prefix`` (cupy uint8) when given.
     """
     import cupy as cp
 
+    if prefix is None:
+        prefix = cp.empty(0, cp.uint8)
     n = int(buf.size)
     cand = append_offsets("bgzf_candidates", buf, n // 28 + 1024)
     if cand.size == 0:
         if eof and n:
             raise ValueError("Truncated BGZF file: the last block is incomplete")
-        return cp.empty(0, cp.uint8), 0
+        return prefix, 0
     bsize = cp.empty(cand.size, cp.int64)
     isize = cp.empty(cand.size, cp.int64)
     launch("bgzf_sizes", int(cand.size), buf, cand, np.int64(cand.size), bsize, isize)
@@ -478,7 +574,7 @@ def _inflate_blocks(buf, eof: bool):
     if m == 0:
         if bool(bad.any()):
             raise ValueError("Corrupt BGZF block")
-        return cp.empty(0, cp.uint8), used
+        return prefix, used
     pay = bsize - _HEADER - _TRAILER
     padded = (pay + 7) // 8 * 8  # nvCOMP wants 4-byte aligned inputs
     in_off = cp.cumsum(padded) - padded
@@ -488,9 +584,11 @@ def _inflate_blocks(buf, eof: bool):
         raise ValueError("Corrupt BGZF block")
     aligned = cp.empty(n_in + 8, cp.uint8)
     copy_spans(buf, aligned, cand + _HEADER, in_off, pay)
-    out = cp.empty(n_out, cp.uint8)
+    p = int(prefix.size)
+    out = cp.empty(p + n_out, cp.uint8)
+    out[:p] = prefix
     in_ptr = in_off.astype(cp.uint64) + np.uint64(aligned.data.ptr)
-    out_ptr = out_off.astype(cp.uint64) + np.uint64(out.data.ptr)
+    out_ptr = out_off.astype(cp.uint64) + np.uint64(out.data.ptr + p)
     in_size, out_size = pay.astype(cp.uint64), isize.astype(cp.uint64)
     actual = cp.empty(m, cp.uint64)
     status = cp.empty(m, cp.int32)
@@ -521,6 +619,16 @@ def inflate_chunks(path: str | Path, chunk_bytes: int | None = None, **reader_kw
     split the data at block boundaries, not at record or line boundaries.
     ``chunk_bytes`` (compressed) defaults to :func:`cubam.auto_chunk_bytes`.
     """
+    return _inflate(path, chunk_bytes, None, **reader_kw)
+
+
+def _inflate(path: str | Path, chunk_bytes: int | None, prefix, **reader_kw) -> Iterator:
+    """:func:`inflate_chunks`, each chunk after the bytes returned by ``prefix()`` (when not None).
+
+    ``prefix`` is called before each chunk is inflated: a caller that keeps
+    bytes for the next chunk (the start of a record) gets them in front of it
+    without copying the chunk.
+    """
     import cupy as cp
 
     from cubam._memory import auto_chunk_bytes
@@ -534,10 +642,11 @@ def inflate_chunks(path: str | Path, chunk_bytes: int | None = None, **reader_kw
             buf = cp.empty(carry.size + nbytes, cp.uint8)
             buf[: carry.size] = carry
             buf[carry.size :].set(reader.host(slot)[:nbytes])
-            data, used = _inflate_blocks(buf, eof)  # synchronises: the copy is done
+            data, used = _inflate_blocks(buf, eof, prefix and prefix())  # synchronises: the copy is done
             reader.release(slot)
             carry = buf[used:].copy()
             del buf
             yield data
+            del data  # not kept alive while the caller works
     finally:
         reader.close()
