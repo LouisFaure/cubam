@@ -10,7 +10,7 @@
 set -euo pipefail
 OUTS=$1 GTF=$2 VCF=$3 BC_RNA=$4 BC_ATAC=$5 W=$6
 shift 6
-STEPS=${*:-features_gex coverage_gex split_gex alleles_atac fragments_atac split_atac alleles_gex}
+STEPS=${*:-features_gex coverage_gex split_gex sort_gex alleles_atac fragments_atac split_atac alleles_gex}
 THREADS=${THREADS:-6}
 GEX=$OUTS/gex_possorted_bam.bam ATAC=$OUTS/atac_possorted_bam.bam
 mkdir -p "$W/base"
@@ -56,6 +56,11 @@ split_atac() {
     mkdir -p "$B/split_atac"
     sinto filterbarcodes -b "$ATAC" -c "$B/groups_atac.tsv" -p "$THREADS" --outdir "$B/split_atac"
     rm -r "$B/split_atac"
+}
+
+sort_gex() {
+    samtools sort -n -@ "$THREADS" -o "$B/sort_gex.bam" "$GEX"
+    rm "$B/sort_gex.bam"
 }
 
 fragments_atac() {  # unsorted, uncompressed output, as cubam writes it here

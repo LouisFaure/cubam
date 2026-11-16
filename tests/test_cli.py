@@ -57,7 +57,7 @@ def test_sizes():
 
 
 def test_help_of_every_command(capsys):
-    for cmd in ("fragments", "coverage", "split", "count", "velocity"):
+    for cmd in ("fragments", "coverage", "split", "sort", "count", "velocity"):
         with pytest.raises(SystemExit) as e:
             build_parser().parse_args([cmd, "--help"])
         assert e.value.code == 0
@@ -125,3 +125,18 @@ def test_count_split_coverage(tmp_path):
     assert {p.name for p in (tmp_path / "bw").glob("*.bw")} == {"c0.bw", "c1.bw"}
     assert main(["coverage", str(bam), "--barcodes", str(groups), "--atac", "-o", str(tmp_path / "atac")]) == 0
     assert {p.name for p in (tmp_path / "atac").glob("*.bw")} == {"c0.bw", "c1.bw"}
+
+
+@gpu
+def test_sort(tmp_path):
+    from cubam import read_bam
+
+    bam = write_bam(tmp_path / "a.bam", REFS, pairs())
+    assert main(["sort", "-n", str(bam), "-o", str(tmp_path / "n.bam")]) == 0
+    names = [n for b in read_bam(tmp_path / "n.bam") for n in b.names().to_arrow().to_pylist()]
+    assert names == sorted(names, key=lambda n: int(n[1:]))
+    assert main(["sort", str(tmp_path / "n.bam"), "-o", str(tmp_path / "c.bam"), "-l", "1"]) == 0
+    pos = [p for b in read_bam(tmp_path / "c.bam") for p in b.pos.get().tolist()]
+    assert pos == sorted(pos) and len(pos) == 60
+    with pytest.raises(SystemExit):
+        main(["sort", "-n", "-N", str(bam), "-o", "x.bam"])

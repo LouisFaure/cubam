@@ -20,6 +20,7 @@ against the CPU tool on 6 threads:
 | Coverage per group, as bigWig | `samtools depth` | samtools, bedtools | 15 min | 11 s | 85× |
 | One BAM per group, GEX | `samtools view -D` | sinto | 15 min | 21 s | 42× |
 | One BAM per group, ATAC | `samtools view -D` | sinto | 27 min | 54 s | 30× |
+| Sort by read name | `samtools sort -n` | samtools | 16 min | 100 s | 9.8× |
 | Counts per cell and gene | featureCounts, Cell Ranger | featureCounts, no cells | 56 s | 16 s | 3.6× |
 
 Times include reading the inputs and writing the outputs. Every
@@ -51,6 +52,8 @@ cubam coverage gex_possorted_bam.bam \
 
 cubam split atac_possorted_bam.bam \
     --barcodes clusters.csv -o by_cluster/
+
+cubam sort -n gex_possorted_bam.bam -o by_name.bam
 
 cubam count gex_possorted_bam.bam --features genes.gtf \
     --barcodes barcodes.tsv.gz -o counts/

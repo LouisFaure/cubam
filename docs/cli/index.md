@@ -25,6 +25,7 @@ fragments
 cellsnp
 coverage
 split
+sort
 count
 velocity
 ```
@@ -62,6 +63,14 @@ One bigWig track per group of barcodes, from reads or ATAC fragments.
 :shadow: none
 
 One BAM file per group of barcodes, or per barcode.
+:::
+
+:::{grid-item-card} {fas}`arrow-down-a-z` cubam sort
+:link: sort
+:link-type: doc
+:shadow: none
+
+A BAM file sorted by coordinate or by read name, as samtools sort.
 :::
 
 :::{grid-item-card} {fas}`table-cells` cubam count

@@ -42,6 +42,27 @@ __global__ void copy_spans(const unsigned char* __restrict__ src, unsigned char*
     for (long long i = lane; i < size[w]; i += 32) d[i] = s[i];
 }
 
+// Bytes of BAM records (their length field + 4) in several buffers: record i at src_ptr[src[i]] + off[i]
+__global__ void record_sizes_at(const unsigned long long* __restrict__ src_ptr, const int* __restrict__ src,
+                                const long long* __restrict__ off, long long n, long long* __restrict__ size) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size[i] = 4 + (long long)u32((const unsigned char*)src_ptr[src[i]], off[i]);
+}
+
+// copy_spans from several buffers: span i is read from the buffer at src_ptr[src[i]]
+__global__ void gather_spans(const unsigned long long* __restrict__ src_ptr, const int* __restrict__ src,
+                             const long long* __restrict__ src_off, unsigned char* __restrict__ dst,
+                             const long long* __restrict__ dst_off, const long long* __restrict__ size,
+                             long long n) {
+    long long w = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane = threadIdx.x & 31;
+    if (w >= n) return;
+    const unsigned char* s = (const unsigned char*)src_ptr[src[w]] + src_off[w];
+    unsigned char* d = dst + dst_off[w];
+    for (long long i = lane; i < size[w]; i += 32) d[i] = s[i];
+}
+
 // ------------------------------------------------------------------ BGZF
 
 // Complete BGZF blocks: the fixed header fields (XLEN 6, one BC subfield) and a block that fits
@@ -547,6 +568,39 @@ __global__ void pack_acgt(const unsigned char* b, const long long* voff, const i
     if (nb == 0) good = false;
     out[i] = good ? (code | ((unsigned long long)nb << 48) | (suffix << 53)) : 0;
     ok[i] = good;
+}
+
+// Read names as keys whose byte order is the natural order of samtools sort -n (strnum_cmp):
+// each run of digits becomes '0', 1 + its length without leading zeros, and those digits.
+// With fill = 0, writes the length of each key to len; with fill = 1, the keys at dst_off.
+__global__ void natural_name(const unsigned char* b, const long long* off, long long n, int fill,
+                             const long long* dst_off, long long* len, unsigned char* chars) {
+    long long r = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= n) return;
+    const unsigned char* q = b + off[r] + 36;
+    int l = (int)b[off[r] + 12] - 1;
+    unsigned char* d = fill ? chars + dst_off[r] : 0;
+    long long k = 0;
+    int i = 0;
+    while (i < l) {
+        unsigned char c = q[i];
+        if (c < '0' || c > '9') {
+            if (fill) d[k] = c;
+            k++;
+            i++;
+            continue;
+        }
+        while (i < l && q[i] == '0') i++;
+        int s = i;
+        while (i < l && q[i] >= '0' && q[i] <= '9') i++;
+        if (fill) {
+            d[k] = '0';
+            d[k + 1] = (unsigned char)(i - s + 1);
+            for (int j = s; j < i; j++) d[k + 2 + j - s] = q[j];
+        }
+        k += 2 + i - s;
+    }
+    if (!fill) len[r] = k;
 }
 
 // Unpack codes of pack_acgt into chars at offsets

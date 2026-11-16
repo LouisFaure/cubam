@@ -6,6 +6,7 @@ Each sub-command calls one application and writes its usual files::
     cubam fragments  atac.bam -o fragments.tsv.gz
     cubam coverage   gex.bam --barcodes clusters.csv -o tracks/
     cubam split      gex.bam --barcodes clusters.csv -o bams/
+    cubam sort       reads.bam -o sorted.bam
     cubam count      gex.bam --features genes.gtf --barcodes barcodes.tsv.gz -o counts/
     cubam velocity   gex.bam --gtf genes.gtf --barcodes barcodes.tsv.gz -o velocity.h5ad
     cubam cellsnp    -s gex.bam -b barcodes.tsv.gz -R snps.vcf.gz -O cellsnp/
@@ -211,6 +212,24 @@ def _split(args) -> tuple[object, str]:
         chunk_bytes=args.chunk_bytes,
     )
     return res, f"{len(res.paths)} BAM files in {args.output}; index them with samtools index"
+
+
+def _sort(args) -> tuple[object, str]:
+    from cubam.apps.sort import sort_bam
+
+    by = "name" if args.name or args.name_bytes else "coordinate"
+    res = sort_bam(
+        args.bam,
+        args.output,
+        by=by,
+        natural=not args.name_bytes,
+        level=args.level,
+        tmp_dir=args.tmp_dir,
+        run_bytes=args.run_bytes,
+        chunk_bytes=args.chunk_bytes,
+    )
+    hint = f"; index it with: samtools index {args.output}" if by == "coordinate" else ""
+    return res, f"{args.output}{hint}"
 
 
 def _features(args):
@@ -468,6 +487,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--level", type=int, default=2, choices=range(6), metavar="0-5", help="nvCOMP Deflate level (default: 2)"
     )
     p.set_defaults(run=_split)
+
+    # sort
+    p = sub.add_parser(
+        "sort",
+        help="sort a BAM file by coordinate or by read name, as samtools sort",
+        description="Sort a BAM file by coordinate, or by read name with -n or -N, in the order of "
+        "samtools sort: the output holds the same records in the same order.",
+    )
+    p.add_argument("bam", type=Path, help="a BAM file, in any order")
+    p.add_argument("-o", "--output", type=Path, required=True, help="the sorted BAM file")
+    order = p.add_mutually_exclusive_group()
+    order.add_argument("-n", dest="name", action="store_true", help="sort by read name, numbers by value (natural)")
+    order.add_argument("-N", dest="name_bytes", action="store_true", help="sort by read name, byte by byte")
+    p.add_argument(
+        "-l", "--level", type=int, default=2, choices=range(6), metavar="0-5", help="nvCOMP Deflate level (default: 2)"
+    )
+    p.add_argument(
+        "-T",
+        "--tmp-dir",
+        type=Path,
+        metavar="DIR",
+        help="directory of the temporary files, when the input is sorted in several runs (default: that of -o)",
+    )
+    p.add_argument(
+        "--run-bytes",
+        type=_size,
+        metavar="SIZE",
+        help="bytes of records sorted at a time on the GPU, e.g. 4G (default: 8G, less on a GPU under 24 GB)",
+    )
+    p.add_argument(
+        "--chunk-bytes",
+        type=_size,
+        metavar="SIZE",
+        help="compressed bytes read at a time, e.g. 64M (default: from the free GPU memory)",
+    )
+    p.set_defaults(run=_sort)
 
     # count
     p = sub.add_parser(

@@ -15,6 +15,7 @@ fragments
 alleles
 coverage
 split
+sort
 features
 velocity
 bgzf
@@ -72,6 +73,14 @@ Coverage tracks per group of cells, from reads or fragments, as bigWig.
 :shadow: none
 
 One BAM file per group of cells or per cell.
+:::
+
+:::{grid-item-card} {fas}`arrow-down-a-z` Sort BAM — `cubam.apps.sort`
+:link: sort
+:link-type: doc
+:shadow: none
+
+A BAM file sorted by coordinate or by read name, as samtools sort.
 :::
 
 :::{grid-item-card} {fas}`table-cells` Feature counts — `cubam.apps.features`
