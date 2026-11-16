@@ -25,6 +25,7 @@ fragments
 cellsnp
 coverage
 split
+markdup
 count
 velocity
 ```
@@ -62,6 +63,14 @@ One bigWig track per group of barcodes, from reads or ATAC fragments.
 :shadow: none
 
 One BAM file per group of barcodes, or per barcode.
+:::
+
+:::{grid-item-card} {fas}`clone` cubam markdup
+:link: markdup
+:link-type: doc
+:shadow: none
+
+Duplicate flags as samtools fixmate -m + markdup, within a cell barcode.
 :::
 
 :::{grid-item-card} {fas}`table-cells` cubam count

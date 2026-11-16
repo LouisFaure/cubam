@@ -17,6 +17,8 @@ cubam coverage gex_possorted_bam.bam \
 cubam split atac_possorted_bam.bam \
     --barcodes clusters.csv -o by_cluster/
 
+cubam markdup sorted.bam --barcode-tag CB -o marked.bam
+
 cubam count gex_possorted_bam.bam --features genes.gtf \
     --barcodes barcodes.tsv.gz -o counts/
 
@@ -35,6 +37,7 @@ available in Python: see [Reading a BAM file](reading.md).
 | [Allele counts](apps/alleles.md) | `cubam cellsnp` | Per-cell allele counts at known sites | cellsnp-lite 1.2.3 (mode 1a) |
 | [Coverage](apps/coverage.md) | `cubam coverage` | Coverage tracks per group of cells, as bigWig | `samtools depth` |
 | [Split](apps/split.md) | `cubam split` | One BAM file per group of cells | `samtools view -D` |
+| [Duplicate marking](apps/markdup.md) | `cubam markdup` | Duplicate flags, within a cell barcode | samtools fixmate -m + markdup 1.22 |
 | [Feature counts](apps/features.md) | `cubam count` | Counts per cell and gene, repeat or peak | featureCounts, Cell Ranger |
 | [Velocity](apps/velocity.md) | `cubam velocity` | Spliced, unspliced and ambiguous molecules | velocyto 0.17 |
 
@@ -57,6 +60,7 @@ apps/fragments
 apps/alleles
 apps/coverage
 apps/split
+apps/markdup
 apps/features
 apps/velocity
 ```
